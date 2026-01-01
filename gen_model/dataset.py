@@ -30,27 +30,38 @@ import pandas as pd
 from .geometry import atom37_to_torsions, atom14_to_atom37, atom14_to_frames
        
 class MDGenDataset(torch.utils.data.Dataset):
-    def __init__(self, args, split, repeat=1):
+    def __init__(self, args, split=None, repeat=1, is_train=True):
         super().__init__()
-        self.df = pd.read_csv(split, index_col='name')
         self.args = args
+        self.split = split
+        if args.pep_name is None:
+            self.df = pd.read_csv(split, index_col='name')
+        else:
+            self.df = None
         self.repeat = repeat
+        self.is_train = is_train
     def __len__(self):
+        if self.args.pep_name:
+            return 1000 * self.repeat
         if self.args.overfit_peptide:
             return 1000
         return self.repeat * len(self.df)
 
     def __getitem__(self, idx):
-        idx = idx % len(self.df)
-        if self.args.overfit:
-            idx = 0
-
-        if self.args.overfit_peptide is None:
-            name = self.df.index[idx]
-            seqres = self.df.seqres[name]
-        else:
-            name = self.args.overfit_peptide
+        if self.args.pep_name:
+            name = self.args.pep_name
             seqres = name
+        else:
+            idx = idx % len(self.df)
+            if self.args.overfit:
+                idx = 0
+
+            if self.args.overfit_peptide is None:
+                name = self.df.index[idx]
+                seqres = self.df.seqres[name]
+            else:
+                name = self.args.overfit_peptide
+                seqres = name
 
         if self.args.atlas:
             i = np.random.randint(1, 4)
@@ -61,7 +72,11 @@ class MDGenDataset(torch.utils.data.Dataset):
         if self.args.frame_interval:
             arr = arr[::self.args.frame_interval]
         
-        frame_start = np.random.choice(np.arange(arr.shape[0] - self.args.num_frames))
+        frame_limit = arr.shape[0]
+        if self.is_train and self.args.train_frame_limit:
+            frame_limit = min(frame_limit, self.args.train_frame_limit)
+        
+        frame_start = np.random.choice(np.arange(frame_limit - self.args.num_frames))
         if self.args.overfit_frame:
             frame_start = 0
         end = frame_start + self.args.num_frames
