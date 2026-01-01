@@ -24,7 +24,7 @@
 
 import torch
 from .rigid_utils import Rigid
-from .residue_constants import restype_order
+from .residue_constants import restype_order, RESTYPE_ATOM37_MASK
 import numpy as np
 import pandas as pd
 from .geometry import atom37_to_torsions, atom14_to_atom37, atom14_to_frames
@@ -34,7 +34,7 @@ class MDGenDataset(torch.utils.data.Dataset):
         super().__init__()
         self.args = args
         self.split = split
-        if args.pep_name is None:
+        if split is not None:
             self.df = pd.read_csv(split, index_col='name')
         else:
             self.df = None
@@ -50,7 +50,12 @@ class MDGenDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if self.args.pep_name:
             name = self.args.pep_name
-            seqres = name
+            if self.args.pep_seq:
+                seqres = self.args.pep_seq
+            elif self.df is not None and name in self.df.index:
+                seqres = self.df.loc[name, 'seqres']
+            else:
+                seqres = name
         else:
             idx = idx % len(self.df)
             if self.args.overfit:
@@ -58,10 +63,13 @@ class MDGenDataset(torch.utils.data.Dataset):
 
             if self.args.overfit_peptide is None:
                 name = self.df.index[idx]
-                seqres = self.df.seqres[name]
+                seqres = self.df.loc[name, 'seqres']
             else:
                 name = self.args.overfit_peptide
-                seqres = name
+                if self.df is not None and name in self.df.index:
+                    seqres = self.df.loc[name, 'seqres']
+                else:
+                    seqres = name
 
         if self.args.atlas:
             i = np.random.randint(1, 4)
@@ -100,7 +108,7 @@ class MDGenDataset(torch.utils.data.Dataset):
                 'frame_start': frame_start,
                 'atom37': atom37,
                 'seqres': seqres,
-                'mask': restype_atom37_mask[seqres], # (L,)
+                'mask': RESTYPE_ATOM37_MASK[seqres], # (L,)
             }
         torsions, torsion_mask = atom37_to_torsions(atom37, aatype)
         

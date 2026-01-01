@@ -74,6 +74,7 @@ def parse_train_args():
     group.add_argument('--val_split', type=str, default=None)
     group.add_argument('--data_dir', type=str, default=None, required=True)
     group.add_argument('--pep_name', type=str, default=None)
+    group.add_argument('--pep_seq', type=str, default=None)
     group.add_argument('--train_frame_limit', type=int, default=None)
     group.add_argument('--num_frames', type=int, default=50)
     group.add_argument('--crop', type=int, default=256)
