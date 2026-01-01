@@ -30,6 +30,15 @@ import pandas as pd
 from .geometry import atom37_to_torsions, atom14_to_atom37, atom14_to_frames
        
 class MDGenDataset(torch.utils.data.Dataset):
+    """
+    Dataset for protein Molecular Dynamics (MD) trajectories.
+    
+    Args:
+        args: Command line arguments containing pep_name, train_frame_limit, etc.
+        split: Path to the split CSV (e.g. atlas.csv) for sequence lookup.
+        repeat: Multiplier for dataset length. Useful for making epochs longer.
+        is_train: Whether this is the training set (enables frame limiting).
+    """
     def __init__(self, args, split=None, repeat=1, is_train=True):
         super().__init__()
         self.args = args
