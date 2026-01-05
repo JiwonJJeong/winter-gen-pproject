@@ -1,97 +1,183 @@
-import os
-import sys
+import pytest
 import torch
 import numpy as np
 import pandas as pd
-from unittest.mock import MagicMock, patch
+import os
+from types import SimpleNamespace
+from gen_model.dataset_projector import MDGenDataset
+from gen_model.dataset_predictor import MDGenDataset as PredictorDataset
+from gen_model.dataset_interpolator import MDGenDataset as InterpolatorDataset
 
-# Add current dir to path to import gen_model
-sys.path.append(os.getcwd())
 
-from gen_model.dataset import MDGenDataset
+@pytest.fixture
+def test_data_path():
+    """Path to test data"""
+    return '/home/jiwonjjeong/repos/winter-gen-pproject/data/4o66_C'
 
-class Args:
-    """Mock arguments for testing."""
-    def __init__(self, pep_name=None, pep_seq=None, train_frame_limit=None):
-        self.pep_name = pep_name
-        self.pep_seq = pep_seq
-        self.train_frame_limit = train_frame_limit
-        self.data_dir = "data"
-        self.suffix = ""
-        self.num_frames = 50
-        self.frame_interval = None
-        self.overfit = False
-        self.overfit_peptide = None
-        self.overfit_frame = False
-        self.atlas = False
-        self.copy_frames = False
-        self.no_frames = False
-        self.no_pad = False
-        self.short_md = False
-        self.crop = 256
 
-class RigidMock:
-    """Mock for the Rigid object returned by atom14_to_frames."""
-    def __init__(self, shape):
-        self._trans = torch.zeros((*shape, 3))
-        self._rots = MagicMock()
-        self._rots._rot_mats = torch.zeros((*shape, 3, 3))
+@pytest.fixture
+def protein_name():
+    """Test protein name"""
+    return "4o66_C"
+
+
+@pytest.fixture
+def dataset_args(test_data_path):
+    """Standard dataset arguments for testing"""
+    return SimpleNamespace(
+        data_dir=test_data_path,
+        suffix='',
+        num_frames=5,
+        overfit=False,
+        overfit_peptide=None,
+        overfit_frame=False,
+        atlas=True,
+        frame_interval=1,
+        copy_frames=False,
+        no_frames=False,
+        crop_ratio=0.95  # Keep 95%, remove 5%
+    )
+
+
+@pytest.fixture
+def temp_split_csv(protein_name, test_data_path, tmp_path):
+    """Create temporary split CSV for testing"""
+    npy_path = f"{test_data_path}/{protein_name}_R1.npy"
+    if not os.path.exists(npy_path):
+        pytest.skip(f"Test data not found: {npy_path}")
     
-    @property
-    def shape(self):
-        return (50, 5) # dummy length
+    arr = np.load(npy_path, mmap_mode='r')
+    L = arr.shape[1]
+    
+    # Create dummy seqres
+    dummy_seqres = 'A' * L
+    df = pd.DataFrame({'seqres': [dummy_seqres]}, index=[protein_name])
+    
+    csv_path = tmp_path / "test_split.csv"
+    df.to_csv(csv_path, index_label='name')
+    
+    return csv_path, L
 
-def run_tests():
-    # Setup common mocks
-    with patch('gen_model.dataset.atom14_to_frames', return_value=RigidMock((50, 5))):
-        with patch('gen_model.dataset.atom14_to_atom37', return_value=np.zeros((50, 5, 37, 3))):
-            with patch('gen_model.dataset.atom37_to_torsions', return_value=(torch.zeros((50, 5, 7, 2)), torch.zeros((5, 7)))):
-                with patch('numpy.lib.format.open_memmap', return_value=np.zeros((200, 5, 14, 3))):
-                    
-                    split_file = "gen_model/splits/atlas.csv"
-                    
-                    # --- Test 1: Protein ID lookup in CSV ---
-                    print("\nTest 1: Protein ID lookup (1a62_A)")
-                    args1 = Args(pep_name="1a62_A")
-                    dataset1 = MDGenDataset(args1, split=split_file, is_train=True)
-                    item1 = dataset1[0]
-                    # Sequence for 1a62_A starts with MNLTE... (indices 12, 2, 10, 16, 6)
-                    print(f"Sequence indices (first 5): {item1['seqres'][:5]}")
-                    assert item1['seqres'][0] == 12, "Should have looked up M (12) from CSV"
-                    
-                    # --- Test 2: Fallback to sequence ---
-                    print("\nTest 2: Fallback to sequence (AAAAA)")
-                    args2 = Args(pep_name="AAAAA")
-                    dataset2 = MDGenDataset(args2, split=split_file, is_train=True)
-                    item2 = dataset2[0]
-                    print(f"Sequence indices: {item2['seqres']}")
-                    assert all(item2['seqres'] == 0), "Should have used Alanines (0)"
-                    
-                    # --- Test 3: Explicit pep_seq override ---
-                    print("\nTest 3: Explicit pep_seq override (RRRRR)")
-                    args3 = Args(pep_name="1a62_A", pep_seq="RRRRR")
-                    dataset3 = MDGenDataset(args3, split=split_file, is_train=True)
-                    item3 = dataset3[0]
-                    print(f"Sequence indices: {item3['seqres']}")
-                    assert all(item3['seqres'] == 1), "Should have used Arginines (1)"
 
-                    # --- Test 4: Temporal Window Logic ---
-                    print("\nTest 4: Temporal window (limit=100)")
-                    args4 = Args(pep_name="AAAAA", train_frame_limit=100)
-                    dataset4 = MDGenDataset(args4, split=split_file, is_train=True)
-                    frame_starts = [dataset4[0]['frame_start'] for _ in range(100)]
-                    max_start = max(frame_starts)
-                    print(f"Max frame_start with limit: {max_start}")
-                    assert max_start <= 100 - 50, f"Frame start {max_start} exceeded limit"
-
-                    print("\nTest 5: Validation has no limit")
-                    dataset5 = MDGenDataset(args4, split=split_file, is_train=False)
-                    frame_starts_val = [dataset5[0]['frame_start'] for _ in range(100)]
-                    max_start_val = max(frame_starts_val)
-                    print(f"Max frame_start in validation: {max_start_val}")
-                    assert max_start_val > 50, "Validation should sample beyond the limit"
-
-    print("\nAll tests passed successfully!")
-
-if __name__ == "__main__":
-    run_tests()
+class TestSpatialMasking:
+    """Tests for spatial masking implementation"""
+    
+    def test_mask_percentage(self, dataset_args, temp_split_csv):
+        """Test that exactly 5% of residues are removed"""
+        csv_path, L = temp_split_csv
+        ds = MDGenDataset(dataset_args, str(csv_path))
+        
+        item = ds[0]
+        mask = item['mask']
+        
+        expected_keep = int(L * dataset_args.crop_ratio)
+        actual_keep = np.sum(mask)
+        removed_count = L - actual_keep
+        removed_pct = (removed_count / L) * 100
+        
+        assert abs(actual_keep - expected_keep) <= 1, \
+            f"Expected to keep {expected_keep} residues, got {actual_keep}"
+        assert 4.0 <= removed_pct <= 6.0, \
+            f"Expected ~5% removal, got {removed_pct:.1f}%"
+    
+    def test_shape_preservation(self, dataset_args, temp_split_csv):
+        """Test that all tensors maintain full length (no slicing)"""
+        csv_path, L = temp_split_csv
+        ds = MDGenDataset(dataset_args, str(csv_path))
+        
+        item = ds[0]
+        
+        assert item['torsions'].shape[1] == L, "torsions was sliced"
+        assert item['trans'].shape[1] == L, "trans was sliced"
+        assert item['rots'].shape[1] == L, "rots was sliced"
+        assert item['mask'].shape[0] == L, "mask was sliced"
+        assert item['torsion_mask'].shape[0] == L, "torsion_mask was sliced"
+    
+    def test_torsion_mask_independence(self, dataset_args, temp_split_csv):
+        """Test that torsion_mask is NOT affected by spatial masking"""
+        csv_path, L = temp_split_csv
+        ds = MDGenDataset(dataset_args, str(csv_path))
+        
+        item = ds[0]
+        mask = item['mask']
+        torsion_mask = item['torsion_mask']
+        
+        # Find spatially masked residues
+        masked_residues = np.where(mask == 0)[0]
+        
+        if len(masked_residues) > 0:
+            # torsion_mask should still reflect chemical validity
+            # (not all zeros for masked residues)
+            sample_idx = masked_residues[0]
+            has_valid_torsions = torch.any(torsion_mask[sample_idx, :] == 1)
+            assert has_valid_torsions, \
+                f"torsion_mask was incorrectly zeroed for masked residue {sample_idx}"
+    
+    def test_no_data_zeroing(self, dataset_args, temp_split_csv):
+        """Test that data values are preserved (not zeroed) for masked residues"""
+        csv_path, L = temp_split_csv
+        ds = MDGenDataset(dataset_args, str(csv_path))
+        
+        item = ds[0]
+        mask = item['mask']
+        torsions = item['torsions']
+        
+        masked_residues = np.where(mask == 0)[0]
+        
+        if len(masked_residues) > 0:
+            # Check that torsion values are not all zero
+            sample_idx = masked_residues[0]
+            torsion_values = torsions[:, sample_idx, :, :]
+            has_nonzero = torch.any(torsion_values != 0)
+            assert has_nonzero, \
+                f"Data was incorrectly zeroed for masked residue {sample_idx}"
+    
+    def test_torsion_mask_shape(self, dataset_args, temp_split_csv):
+        """Test that torsion_mask has correct shape [L, 7]"""
+        csv_path, L = temp_split_csv
+        ds = MDGenDataset(dataset_args, str(csv_path))
+        
+        item = ds[0]
+        torsion_mask = item['torsion_mask']
+        
+        assert torsion_mask.shape == (L, 7), \
+            f"Expected torsion_mask shape ({L}, 7), got {torsion_mask.shape}"
+    
+    def test_randomness(self, dataset_args, temp_split_csv):
+        """Test that different samples produce different masks"""
+        csv_path, L = temp_split_csv
+        ds = MDGenDataset(dataset_args, str(csv_path))
+        
+        masks = []
+        for _ in range(3):
+            item = ds[0]
+            masks.append(item['mask'].copy())
+        
+        # At least one pair should be different (very high probability)
+        different = False
+        for i in range(len(masks)):
+            for j in range(i + 1, len(masks)):
+                if not np.array_equal(masks[i], masks[j]):
+                    different = True
+                    break
+        
+        assert different, "All masks are identical - randomness not working"
+    
+    @pytest.mark.parametrize("dataset_class,name", [
+        (MDGenDataset, "projector"),
+        (PredictorDataset, "predictor"),
+        (InterpolatorDataset, "interpolator"),
+    ])
+    def test_all_dataset_variants(self, dataset_class, name, dataset_args, temp_split_csv):
+        """Test that all dataset variants implement spatial masking correctly"""
+        csv_path, L = temp_split_csv
+        ds = dataset_class(dataset_args, str(csv_path))
+        
+        item = ds[0]
+        mask = item['mask']
+        
+        expected_keep = int(L * dataset_args.crop_ratio)
+        actual_keep = np.sum(mask)
+        
+        assert abs(actual_keep - expected_keep) <= 1, \
+            f"{name} dataset: Expected {expected_keep}, got {actual_keep}"

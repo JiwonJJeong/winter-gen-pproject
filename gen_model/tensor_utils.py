@@ -18,6 +18,7 @@ from typing import List
 
 import torch
 import torch.nn as nn
+import numpy as np
 
 
 def add(m1, m2, inplace):
@@ -77,10 +78,21 @@ def one_hot(x, v_bins):
 
 
 def batched_gather(data, inds, dim=0, no_batch_dims=0):
+    is_numpy = isinstance(data, np.ndarray)
     ranges = []
     for i, s in enumerate(data.shape[:no_batch_dims]):
-        r = torch.arange(s)
-        r = r.view(*(*((1,) * i), -1, *((1,) * (len(inds.shape) - i - 1))))
+        if is_numpy:
+            r = np.arange(s)
+        else:
+            r = torch.arange(s)
+            if hasattr(inds, 'device'):
+                 r = r.to(inds.device)
+        
+        # Reshape r to broadcast with inds
+        # Original logic: r.view(*(*((1,) * i), -1, *((1,) * (len(inds.shape) - i - 1))))
+        view_shape = [1] * len(inds.shape)
+        view_shape[i] = -1
+        r = r.reshape(*view_shape)
         ranges.append(r)
 
     remaining_dims = [
@@ -88,7 +100,7 @@ def batched_gather(data, inds, dim=0, no_batch_dims=0):
     ]
     remaining_dims[dim - no_batch_dims if dim >= 0 else dim] = inds
     ranges.extend(remaining_dims)
-    return data[ranges]
+    return data[tuple(ranges)]
 
 
 # With tree_map, a poor man's JAX tree_map

@@ -21,7 +21,19 @@ from typing import Mapping, List, Tuple
 from importlib import resources
 
 import numpy as np
-import tree
+
+
+# Minimal replacement for tree.map_structure
+def map_structure(func, structure):
+    if isinstance(structure, list):
+        return [map_structure(func, x) for x in structure]
+    elif isinstance(structure, tuple):
+        return tuple(map_structure(func, x) for x in structure)
+    elif isinstance(structure, dict):
+        return {k: map_structure(func, v) for k, v in structure.items()}
+    else:
+        return func(structure)
+
 
 
 # Distance from one CA to next CA [trans configuration: omega = 180].
@@ -1079,8 +1091,8 @@ chi_atom_2_one_hot = chi_angle_atom(2)
 
 # An array like chi_angles_atoms but using indices rather than names.
 chi_angles_atom_indices = [chi_angles_atoms[restype_1to3[r]] for r in restypes]
-chi_angles_atom_indices = tree.map_structure(
-    lambda atom_name: atom_order[atom_name], chi_angles_atom_indices
+chi_angles_atom_indices = map_structure(
+    lambda x: atom_order[x], chi_angles_atom_indices
 )
 chi_angles_atom_indices = np.array(
     [

@@ -93,6 +93,29 @@ class MDGenDataset(torch.utils.data.Dataset):
         
 
 
+        # Masking logic
+        if hasattr(self.args, 'crop_ratio') and self.args.crop_ratio > 0:
+            ratio = self.args.crop_ratio
+        else:
+            ratio = 0.95 # Default crop ratio if not specified
+        
+        keep_len = int(L * ratio)
+        if keep_len < L:
+             seed_idx = np.random.randint(L)
+             # Use CA atoms (index 1) of the first frame for distance calculation
+             ref_coords = atom37[0, :, 1, :] # [L, 3]
+             dists = torch.norm(ref_coords - ref_coords[seed_idx], dim=-1) # [L]
+             
+             _, keep_indices = torch.topk(dists, k=keep_len, largest=False)
+             
+             spatial_mask = torch.zeros(L, device=atom37.device)
+             spatial_mask[keep_indices] = 1.0
+             
+             # Apply spatial mask only to residue-level mask
+             # torsion_mask remains unchanged (reflects chemical validity only)
+             mask = mask * spatial_mask.cpu().numpy()
+        # Else (if keeping everything), mask stays as ones (from initialization)
+
         return {
             'name': full_name,
             'frame_start': frame_start,
