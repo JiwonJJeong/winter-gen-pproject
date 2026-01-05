@@ -30,55 +30,27 @@ import pandas as pd
 from .geometry import atom37_to_torsions, atom14_to_atom37, atom14_to_frames
        
 class MDGenDataset(torch.utils.data.Dataset):
-    """
-    Dataset for protein Molecular Dynamics (MD) trajectories.
-    
-    Args:
-        args: Command line arguments containing pep_name, train_frame_limit, etc.
-        split: Path to the split CSV (e.g. atlas.csv) for sequence lookup.
-        repeat: Multiplier for dataset length. Useful for making epochs longer.
-        is_train: Whether this is the training set (enables frame limiting).
-    """
-    def __init__(self, args, split=None, repeat=1, is_train=True):
+    def __init__(self, args, split, repeat=1):
         super().__init__()
+        self.df = pd.read_csv(split, index_col='name')
         self.args = args
-        self.split = split
-        if split is not None:
-            self.df = pd.read_csv(split, index_col='name')
-        else:
-            self.df = None
         self.repeat = repeat
-        self.is_train = is_train
     def __len__(self):
-        if self.args.pep_name:
-            return 1000 * self.repeat
         if self.args.overfit_peptide:
             return 1000
         return self.repeat * len(self.df)
 
     def __getitem__(self, idx):
-        if self.args.pep_name:
-            name = self.args.pep_name
-            if self.args.pep_seq:
-                seqres = self.args.pep_seq
-            elif self.df is not None and name in self.df.index:
-                seqres = self.df.loc[name, 'seqres']
-            else:
-                seqres = name
-        else:
-            idx = idx % len(self.df)
-            if self.args.overfit:
-                idx = 0
+        idx = idx % len(self.df)
+        if self.args.overfit:
+            idx = 0
 
-            if self.args.overfit_peptide is None:
-                name = self.df.index[idx]
-                seqres = self.df.loc[name, 'seqres']
-            else:
-                name = self.args.overfit_peptide
-                if self.df is not None and name in self.df.index:
-                    seqres = self.df.loc[name, 'seqres']
-                else:
-                    seqres = name
+        if self.args.overfit_peptide is None:
+            name = self.df.index[idx]
+            seqres = self.df.seqres[name]
+        else:
+            name = self.args.overfit_peptide
+            seqres = name
 
         if self.args.atlas:
             i = np.random.randint(1, 4)
@@ -89,11 +61,7 @@ class MDGenDataset(torch.utils.data.Dataset):
         if self.args.frame_interval:
             arr = arr[::self.args.frame_interval]
         
-        frame_limit = arr.shape[0]
-        if self.is_train and self.args.train_frame_limit:
-            frame_limit = min(frame_limit, self.args.train_frame_limit)
-        
-        frame_start = np.random.choice(np.arange(frame_limit - self.args.num_frames))
+        frame_start = np.random.choice(np.arange(arr.shape[0] - self.args.num_frames))
         if self.args.overfit_frame:
             frame_start = 0
         end = frame_start + self.args.num_frames
@@ -117,32 +85,13 @@ class MDGenDataset(torch.utils.data.Dataset):
                 'frame_start': frame_start,
                 'atom37': atom37,
                 'seqres': seqres,
-                'mask': RESTYPE_ATOM37_MASK[seqres], # (L,)
+                'mask': restype_atom37_mask[seqres], # (L,)
             }
         torsions, torsion_mask = atom37_to_torsions(atom37, aatype)
         
         torsion_mask = torsion_mask[0]
         
-        if self.args.atlas:
-            if L > self.args.crop:
-                start = np.random.randint(0, L - self.args.crop + 1)
-                torsions = torsions[:,start:start+self.args.crop]
-                frames = frames[:,start:start+self.args.crop]
-                seqres = seqres[start:start+self.args.crop]
-                mask = mask[start:start+self.args.crop]
-                torsion_mask = torsion_mask[start:start+self.args.crop]
-                
-            
-            elif L < self.args.crop:
-                pad = self.args.crop - L
-                frames = Rigid.cat([
-                    frames, 
-                    Rigid.identity((self.args.num_frames, pad), requires_grad=False, fmt='rot_mat')
-                ], 1)
-                mask = np.concatenate([mask, np.zeros(pad, dtype=np.float32)])
-                seqres = np.concatenate([seqres, np.zeros(pad, dtype=int)])
-                torsions = torch.cat([torsions, torch.zeros((torsions.shape[0], pad, 7, 2), dtype=torch.float32)], 1)
-                torsion_mask = torch.cat([torsion_mask, torch.zeros((pad, 7), dtype=torch.float32)])
+
 
         return {
             'name': full_name,

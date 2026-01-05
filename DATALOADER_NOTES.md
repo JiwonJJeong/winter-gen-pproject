@@ -1,5 +1,18 @@
 # MDGenDataset Data Loading Notes
 
+## 0. Data Preparation
+Before loading data, ensure you have downloaded and preprocessed the necessary protein trajectories.
+Use the provided helper script to automate this process:
+
+```bash
+# Usage: python scripts/download_and_prep.py <PROTEIN_ID>
+python scripts/download_and_prep.py 1a62_A
+```
+
+This script will:
+1. Download the raw data for `1a62_A` into `data/`.
+2. Preprocess it into `.npy` format (e.g., `data/1a62_A_R1.npy`).
+
 ## 1. Protein Specification
 You can specify which protein to load using the following arguments:
 

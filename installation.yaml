@@ -18,6 +18,8 @@ dependencies:
   - tqdm
   - pyyaml
   - ipykernel
+  - mdtraj
+  - requests
   - pip:
     - pytorch-lightning
     - wandb
