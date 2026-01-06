@@ -1,40 +1,17 @@
-# MIT License
-
-# Copyright (c) 2024 Bowen Jing, Hannes Stärk, Tommi Jaakkola, Bonnie Berger
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-
-# Adapted from # https://github.com/bjing2016/mdgen/blob/master/mdgen/dataset.py
-
 import torch
 from .rigid_utils import Rigid
 from .residue_constants import restype_order, RESTYPE_ATOM37_MASK
 import numpy as np
 import pandas as pd
 from .geometry import atom37_to_torsions, atom14_to_atom37, atom14_to_frames
-       
+
 class MDGenDataset(torch.utils.data.Dataset):
     def __init__(self, args, split, repeat=1):
         super().__init__()
         self.df = pd.read_csv(split, index_col='name')
         self.args = args
         self.repeat = repeat
+
     def __len__(self):
         if self.args.overfit_peptide:
             return 1000
@@ -57,53 +34,58 @@ class MDGenDataset(torch.utils.data.Dataset):
             full_name = f"{name}_R{i}"
         else:
             full_name = name
+            
         arr = np.lib.format.open_memmap(f'{self.args.data_dir}/{full_name}{self.args.suffix}.npy', 'r')
         if self.args.frame_interval:
             arr = arr[::self.args.frame_interval]
         
-        frame_start = np.random.choice(np.arange(arr.shape[0] - self.args.num_frames))
+        # --- 1. Select Single Random Frame ---
+        frame_idx = np.random.choice(np.arange(arr.shape[0]))
         if self.args.overfit_frame:
-            frame_start = 0
-        end = frame_start + self.args.num_frames
-        # arr = np.copy(arr[frame_start:end]) * 10 # convert to angstroms
-        arr = np.copy(arr[frame_start:end]).astype(np.float32) # / 10.0 # convert to nm
-        if self.args.copy_frames:
-            arr[1:] = arr[0]
+            frame_idx = 0
+            
+        # Load Clean Data and reshape to (1, N_atoms, 3) to maintain batch dims
+        clean_arr = np.copy(arr[frame_idx])[None, ...].astype(np.float32)
+        
+        # --- 2. Inject Noise ---
+        # Create input array (Noised)
+        input_arr = clean_arr.copy()
+        
+        # Get noise scale from args or default to 0.1
+        noise_scale = getattr(self.args, 'noise_scale', 0.1)
+        
+        noise = np.random.normal(loc=0.0, scale=noise_scale, size=input_arr.shape).astype(np.float32)
+        input_arr += noise
 
-        # arr should be in ANGSTROMS
-        frames = atom14_to_frames(torch.from_numpy(arr))
+        # --- 3. Compute Features on NOISED Data ---
+        # The model sees the distorted geometry
+        frames = atom14_to_frames(torch.from_numpy(input_arr))
+        
         seqres = np.array([restype_order[c] for c in seqres])
-        aatype = torch.from_numpy(seqres)[None].expand(self.args.num_frames, -1)
-        atom37 = torch.from_numpy(atom14_to_atom37(arr, aatype)).float()
+        # Expand seqres to match the single frame dimension (1, L)
+        aatype = torch.from_numpy(seqres)[None].expand(1, -1)
+        
+        atom37 = torch.from_numpy(atom14_to_atom37(input_arr, aatype)).float()
         
         L = frames.shape[1]
         mask = np.ones(L, dtype=np.float32)
         
-        if self.args.no_frames:
-            return {
-                'name': full_name,
-                'frame_start': frame_start,
-                'atom37': atom37,
-                'seqres': seqres,
-                'mask': restype_atom37_mask[seqres], # (L,)
-            }
         torsions, torsion_mask = atom37_to_torsions(atom37, aatype)
-        
         torsion_mask = torsion_mask[0]
-        
 
-
-        # Masking logic
+        # --- 4. Spatial Cropping (GNN Subgraph) ---
         if hasattr(self.args, 'crop_ratio') and self.args.crop_ratio > 0:
             ratio = self.args.crop_ratio
         else:
-            ratio = 0.95 # Default crop ratio if not specified
+            ratio = 0.95 # Default crop ratio
         
         keep_len = int(L * ratio)
         if keep_len < L:
              seed_idx = np.random.randint(L)
-             # Use CA atoms (index 1) of the first frame for distance calculation
-             ref_coords = atom37[0, :, 1, :] # [L, 3]
+             
+             # Calculate distance based on the NOISED input
+             # This ensures the crop is consistent with what the model "sees"
+             ref_coords = atom37[0, :, 1, :] # [L, 3] (CA atoms)
              dists = torch.norm(ref_coords - ref_coords[seed_idx], dim=-1) # [L]
              
              _, keep_indices = torch.topk(dists, k=keep_len, largest=False)
@@ -111,18 +93,22 @@ class MDGenDataset(torch.utils.data.Dataset):
              spatial_mask = torch.zeros(L, device=atom37.device)
              spatial_mask[keep_indices] = 1.0
              
-             # Apply spatial mask only to residue-level mask
-             # torsion_mask remains unchanged (reflects chemical validity only)
              mask = mask * spatial_mask.cpu().numpy()
-        # Else (if keeping everything), mask stays as ones (from initialization)
 
         return {
             'name': full_name,
-            'frame_start': frame_start,
-            'torsions': torsions,
+            'frame_idx': frame_idx,
+            
+            # Input Features (Noised)
+            'torsions': torsions,           # Shape: (1, L, 7, 2)
             'torsion_mask': torsion_mask,
-            'trans': frames._trans,
-            'rots': frames._rots._rot_mats,
+            'trans': frames._trans,         # Shape: (1, L, 3)
+            'rots': frames._rots._rot_mats, # Shape: (1, L, 3, 3)
             'seqres': seqres,
-            'mask': mask, # (L,)
+            'mask': mask,                   # (L,)
+            
+            # Ground Truth Targets (Clean)
+            # Use this for loss calculation: MSE(model_pred, clean_coords)
+            'clean_coords': torch.from_numpy(clean_arr).float(), # Shape: (1, 14, 3)
+            'clean_atom37': torch.from_numpy(atom14_to_atom37(clean_arr, aatype)).float()
         }

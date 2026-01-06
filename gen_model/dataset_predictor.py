@@ -181,9 +181,18 @@ class MDGenDataset(torch.utils.data.Dataset):
         torsions_k, torsion_mask_k = atom37_to_torsions(atom37_k, aatype)
         
         torsion_mask = torsion_mask_0[0]  # Use frame 0's torsion mask as reference
+
+        # 1. ADD THIS: Process the CLEAN version of frame k for ground truth
+        # We need the geometry of the unnoised frame to calculate the loss
+        frames_k_clean = atom14_to_frames(torch.from_numpy(frame_k))
+        atom37_k_clean = torch.from_numpy(atom14_to_atom37(frame_k, aatype)).float()
+        torsions_k_clean, _ = atom37_to_torsions(atom37_k_clean, aatype)
+
+        # Process frame k_noised (the input for the model)
+        frames_k_noised = atom14_to_frames(torch.from_numpy(frame_k_noised))
+        atom37_k_noised = torch.from_numpy(atom14_to_atom37(frame_k_noised, aatype)).float()
+        torsions_k_noised, torsion_mask_k = atom37_to_torsions(atom37_k_noised, aatype)
         
-
-
         # Masking logic
         if hasattr(self.args, 'crop_ratio') and self.args.crop_ratio > 0:
             ratio = self.args.crop_ratio
@@ -205,21 +214,31 @@ class MDGenDataset(torch.utils.data.Dataset):
              # Apply spatial mask only to residue-level mask
              # torsion_mask remains unchanged (reflects chemical validity only)
              mask = mask * spatial_mask.cpu().numpy()
-        # Else (if keeping everything), mask stays as ones (from initialization)
 
         return {
             'name': full_name,
             'frame_idx': frame_idx,
             'k_steps': self.k_steps,
-            # Frame 0 data (clean)
+            
+            # --- INPUTS ---
+            # Frame 0 (Context/Initial)
             'torsions_0': torsions_0,
             'trans_0': frames_0._trans,
             'rots_0': frames_0._rots._rot_mats,
-            # Frame k data (noised)
-            'torsions_k': torsions_k,
-            'trans_k': frames_k._trans,
-            'rots_k': frames_k._rots._rot_mats,
-            # Shared data
+            
+            # Frame k (Noised Input to be corrected)
+            'torsions_k': torsions_k_noised,
+            'trans_k': frames_k_noised._trans,
+            'rots_k': frames_k_noised._rots._rot_mats,
+
+            # --- GROUND TRUTH (The Fix) ---
+            # These are the clean targets for frame k
+            'target_trans': frames_k_clean._trans,
+            'target_rots': frames_k_clean._rots._rot_mats,
+            'target_torsions': torsions_k_clean,
+            'target_atom37': atom37_k_clean,
+            
+            # Metadata & Masks
             'torsion_mask': torsion_mask,
             'seqres': seqres,
             'mask': mask, # (L,)
