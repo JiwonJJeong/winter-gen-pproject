@@ -36,40 +36,104 @@ class MDGenDataset(torch.utils.data.Dataset):
         self.args = args
         self.repeat = repeat
         self.k_steps = k_steps
+        
+        # Build index mapping: dataset_idx -> (protein_idx, frame_idx)
+        self._build_frame_index()
+    
+    def _build_frame_index(self):
+        """Build an index that maps dataset indices to (protein_idx, frame_idx) pairs"""
+        self.frame_index = []
+        
+        if self.args.overfit_peptide:
+            # For overfitting, we'll handle this in __getitem__
+            return
+        
+        for protein_idx, name in enumerate(self.df.index):
+            # Determine the trajectory file to check
+            if self.args.atlas:
+                # For atlas, we'll use R1 to determine frame count
+                # (assuming all replicates have the same number of frames)
+                full_name = f"{name}_R1"
+            else:
+                full_name = name
+            
+            try:
+                arr = np.lib.format.open_memmap(
+                    f'{self.args.data_dir}/{full_name}{self.args.suffix}.npy', 'r'
+                )
+                num_frames = arr.shape[0]
+                
+                if self.args.frame_interval:
+                    num_frames = len(range(0, num_frames, self.args.frame_interval))
+                
+                # Calculate valid starting frames (need room for k_steps forward)
+                max_start_idx = num_frames - self.k_steps - 1
+                
+                if max_start_idx >= 0:
+                    # Add all valid frame indices for this protein
+                    for frame_idx in range(max_start_idx + 1):
+                        self.frame_index.append((protein_idx, frame_idx))
+            except Exception as e:
+                print(f"Warning: Could not load {full_name}: {e}")
+                continue
+        
+        # Apply repeat factor
+        if self.repeat > 1:
+            self.frame_index = self.frame_index * self.repeat
+    
     def __len__(self):
         if self.args.overfit_peptide:
             return 1000
-        return self.repeat * len(self.df)
+        return len(self.frame_index)
 
     def __getitem__(self, idx):
-        idx = idx % len(self.df)
-        if self.args.overfit:
-            idx = 0
-
-        if self.args.overfit_peptide is None:
-            name = self.df.index[idx]
-            seqres = self.df.seqres[name]
-        else:
+        # Handle overfitting modes
+        if self.args.overfit_peptide:
+            # For overfit_peptide, use random frame selection
             name = self.args.overfit_peptide
             seqres = name
-
-        if self.args.atlas:
-            i = np.random.randint(1, 4)
-            full_name = f"{name}_R{i}"
+            protein_idx = 0
+            
+            # Load trajectory
+            if self.args.atlas:
+                i = np.random.randint(1, 4)
+                full_name = f"{name}_R{i}"
+            else:
+                full_name = name
+            
+            arr = np.lib.format.open_memmap(f'{self.args.data_dir}/{full_name}{self.args.suffix}.npy', 'r')
+            if self.args.frame_interval:
+                arr = arr[::self.args.frame_interval]
+            
+            # Random frame selection for overfitting
+            max_start_idx = arr.shape[0] - self.k_steps - 1
+            if max_start_idx < 0:
+                raise ValueError(f"Trajectory too short: {arr.shape[0]} frames, need at least {self.k_steps + 1}")
+            
+            frame_idx = np.random.choice(np.arange(max_start_idx + 1))
+            if self.args.overfit_frame:
+                frame_idx = 0
         else:
-            full_name = name
-        arr = np.lib.format.open_memmap(f'{self.args.data_dir}/{full_name}{self.args.suffix}.npy', 'r')
-        if self.args.frame_interval:
-            arr = arr[::self.args.frame_interval]
-        
-        # Select a random frame, ensuring we have room for k_steps forward
-        max_start_idx = arr.shape[0] - self.k_steps - 1
-        if max_start_idx < 0:
-            raise ValueError(f"Trajectory too short: {arr.shape[0]} frames, need at least {self.k_steps + 1}")
-        
-        frame_idx = np.random.choice(np.arange(max_start_idx + 1))
-        if self.args.overfit_frame:
-            frame_idx = 0
+            # Use deterministic frame indexing
+            protein_idx, frame_idx = self.frame_index[idx]
+            name = self.df.index[protein_idx]
+            seqres = self.df.seqres[name]
+            
+            # Load trajectory
+            if self.args.atlas:
+                # Randomly select a replicate for atlas
+                i = np.random.randint(1, 4)
+                full_name = f"{name}_R{i}"
+            else:
+                full_name = name
+            
+            arr = np.lib.format.open_memmap(f'{self.args.data_dir}/{full_name}{self.args.suffix}.npy', 'r')
+            if self.args.frame_interval:
+                arr = arr[::self.args.frame_interval]
+            
+            if self.args.overfit:
+                # For overfit mode, always use frame 0
+                frame_idx = 0
         
         # Get the initial frame and the frame k_steps forward
         frame_0 = np.copy(arr[frame_idx:frame_idx+1]).astype(np.float32)  # Shape: (1, L, 14, 3)

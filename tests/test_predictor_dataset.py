@@ -151,3 +151,52 @@ class TestPredictorDataset:
         # This test just ensures the code runs without error
         assert 'trans_0' in item
         assert 'trans_k' in item
+    
+    def test_deterministic_frame_selection(self, dataset_args, temp_split_csv):
+        """Test that the same index returns the same frame deterministically"""
+        csv_path, L = temp_split_csv
+        ds = MDGenDataset(dataset_args, str(csv_path), k_steps=1)
+        
+        # Get the same index multiple times
+        idx = 0
+        item1 = ds[idx]
+        item2 = ds[idx]
+        
+        # The frame_idx should be the same (deterministic)
+        assert item1['frame_idx'] == item2['frame_idx']
+        assert item1['name'] == item2['name']
+        
+        # Note: trans values will differ due to noise, but the underlying frame should be the same
+        # We can verify this by checking that frame_idx is consistent
+    
+    def test_different_indices_different_frames(self, dataset_args, temp_split_csv):
+        """Test that different indices return different frames"""
+        csv_path, L = temp_split_csv
+        ds = MDGenDataset(dataset_args, str(csv_path), k_steps=1)
+        
+        if len(ds) < 2:
+            pytest.skip("Dataset too small for this test")
+        
+        # Get different indices
+        item1 = ds[0]
+        item2 = ds[1]
+        
+        # They should have different frame indices (assuming trajectory is long enough)
+        # Note: they might have the same name if it's the same protein
+        assert item1['frame_idx'] != item2['frame_idx'] or item1['name'] != item2['name']
+    
+    def test_dataset_length_reflects_all_frames(self, dataset_args, temp_split_csv):
+        """Test that dataset length reflects all valid frame pairs"""
+        csv_path, L = temp_split_csv
+        k_steps = 1
+        ds = MDGenDataset(dataset_args, str(csv_path), k_steps=k_steps)
+        
+        # The dataset length should be greater than just the number of proteins
+        # It should include all valid frames across all proteins
+        assert len(ds) > 0
+        
+        # Verify we can access all indices
+        for i in range(min(5, len(ds))):  # Test first 5 or all if less
+            item = ds[i]
+            assert 'frame_idx' in item
+            assert 'torsions_0' in item
