@@ -53,7 +53,18 @@ Each `__getitem__` call returns:
 }
 ```
 
-## 5. Usage
+## 6. Protein and Replica Filtering
+
+To ensure consistent sequence lengths within a batch (avoiding `stack` errors), it is recommended to filter the dataset to a single protein. You can also filter by simulation replica.
+
+- **`--pep_name`**: Filters trajectories to only include the specified protein name (e.g., `4o66_C`).
+    - **Default**: `None` (loads all proteins in the split file).
+    - **Note**: Batching proteins of different lengths will cause a `RuntimeError`.
+- **`--replica`**: Filters trajectories to only include the specified replica number (e.g., `1` for `_R1`).
+    - **Default**: `1` (loads the first replica only).
+    - **Note**: Set to `None` in `args` (or avoid passing it if using a custom script) to load all replicas.
+
+## 7. Usage
 
 ### Preprocessing
 To download, preprocess, and split a new protein:
@@ -65,5 +76,8 @@ python scripts/download_and_prep.py 1a62_A --train_early_ns 50.0 --ratios 0.6 0.
 ```python
 # The 'split' argument is completely optional.
 # It defaults to 'gen_model/splits/frame_splits.csv'
+# Ensure args.pep_name is set to avoid mixed-length batches.
+args.pep_name = "4o66_C"
+args.replica = 1 # Default
 dataset = MDGenDataset(args, mode='train')
 ```

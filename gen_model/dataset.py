@@ -58,6 +58,15 @@ class MDGenDataset(torch.utils.data.Dataset):
 
         for protein_idx, name in enumerate(self.df.index):
             folder_name = name.split('_R')[0]
+            
+            # Filter by pep_name if provided
+            if getattr(self.args, 'pep_name', None) and folder_name != self.args.pep_name:
+                continue
+            
+            # Filter by replica if provided
+            if getattr(self.args, 'replica', None) and not name.endswith(f"_R{self.args.replica}"):
+                continue
+                
             npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
             
             try:
