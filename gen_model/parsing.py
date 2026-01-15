@@ -80,6 +80,7 @@ def parse_train_args():
     group.add_argument('--num_frames', type=int, default=50)
     group.add_argument('--crop', type=int, default=256)
     group.add_argument('--suffix', type=str, default='')
+    group.add_argument('--crop_ratio', type=float, default=0.95, help="Ratio of residues to keep during spatial masking (1.0 = no masking)")
     group.add_argument('--atlas', action='store_true')
     group.add_argument('--copy_frames', action='store_true')
     group.add_argument('--no_pad', action='store_true')

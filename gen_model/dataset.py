@@ -43,6 +43,7 @@ class MDGenDataset(torch.utils.data.Dataset):
         self.num_consecutive = num_consecutive
         self.stride = stride
         
+        self.balanced_weights = {}
         self._build_frame_index()
     
     def _build_frame_index(self):
@@ -72,6 +73,20 @@ class MDGenDataset(torch.utils.data.Dataset):
             try:
                 arr = np.lib.format.open_memmap(npy_path, 'r')
                 num_frames = arr.shape[0]
+
+                # Determine reference frame for IPF if masking is needed
+                masking_enabled = self.mode not in ['val', 'test'] and getattr(self.args, 'crop_ratio', 0.95) < 1.0
+                if folder_name not in self.balanced_weights and masking_enabled:
+                    ref_frame_idx = 0
+                    if has_splits and self.mode == 'train':
+                        ref_frame_idx = int(self.df.loc[name, 'train_early_end'])
+                        if self.args.frame_interval:
+                            ref_frame_idx //= self.args.frame_interval
+                        # Clamp to valid range
+                        ref_frame_idx = min(ref_frame_idx, num_frames - required_span)
+                    
+                    first_frame_ca = np.array(arr[ref_frame_idx, :, 1, :])
+                    self.balanced_weights[folder_name] = self._compute_balanced_weights(first_frame_ca, self.args.crop_ratio)
                 
                 if self.args.frame_interval:
                     num_frames = len(range(0, num_frames, self.args.frame_interval))
@@ -110,6 +125,35 @@ class MDGenDataset(torch.utils.data.Dataset):
         
         if self.repeat > 1:
             self.frame_index = self.frame_index * self.repeat
+
+    def _compute_balanced_weights(self, coords, crop_ratio):
+        """
+        Solves for seed selection weights that result in uniform inclusion probability
+        for all residues using Iterative Proportional Fitting (IPF).
+        """
+        L = len(coords)
+        if L == 0: return np.array([])
+        k = max(1, int(L * crop_ratio))
+        
+        # Compute neighbor matrix M
+        coords_torch = torch.from_numpy(coords).float()
+        dist_sq = torch.sum((coords_torch.unsqueeze(1) - coords_torch.unsqueeze(0))**2, dim=-1)
+        _, top_indices = torch.topk(dist_sq, k=k, largest=False, dim=1) # Neighbors for each seed i
+        
+        M = torch.zeros((L, L))
+        M.scatter_(1, top_indices, 1.0) # M[i, j] = 1 if j is in top-k of i
+        
+        target = k / L
+        w = torch.ones(L) / L
+        
+        # IPF iterations
+        for _ in range(50):
+            current_prob = torch.mv(M.t(), w) # P_j = sum_i w_i M_ij
+            correction = target / (current_prob + 1e-10)
+            w = w * torch.mv(M, correction) / k
+            w /= (w.sum() + 1e-10)
+            
+        return w.numpy()
     
     def __len__(self):
         if self.args.overfit_peptide: return 1000
@@ -163,10 +207,17 @@ class MDGenDataset(torch.utils.data.Dataset):
         
         L = clean_frames.shape[1]
         
-        # 4. Spatial Cropping
+        # 4. Spatial Cropping (only for training modes)
         mask = np.ones(L, dtype=np.float32)
-        if hasattr(self.args, 'crop_ratio') and self.args.crop_ratio < 1.0:
-            seed_idx = np.random.randint(L)
+        masking_enabled = self.mode not in ['val', 'test'] and getattr(self.args, 'crop_ratio', 0.95) < 1.0
+        
+        if masking_enabled:
+            if folder_name in self.balanced_weights:
+                weights = self.balanced_weights[folder_name]
+                seed_idx = np.random.choice(L, p=weights)
+            else:
+                seed_idx = np.random.randint(L)
+                
             ref_coords = atom37[0, :, 1, :] 
             dists = torch.norm(ref_coords - ref_coords[seed_idx], dim=-1)
             keep_len = int(L * self.args.crop_ratio)

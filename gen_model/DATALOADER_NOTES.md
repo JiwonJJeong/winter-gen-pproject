@@ -14,11 +14,12 @@ Default early threshold: 5ns.
 Default mode: 'train'.
 
 ## 3. Spatial Masking
-Supports generative tasks by removing residues.
-- Percentage: ~5% removed (args.crop_ratio=0.95).
-- Detection: A random residue is picked; its nearest neighbors are kept.
-- mask: [L] tensor (1.0 = visible, 0.0 = masked).
-- torsion_mask: Reflects chemical validity; unaffected by spatial masking.
+Supports generative tasks by removing residues. Only applied in 'train'/'train_early' when `crop_ratio` < 1.0.
+- Goal: Uniform visibility probability ($k/L$) for all residues, removing core bias.
+- Mechanism: Iterative Proportional Fitting (IPF) computes balanced seed weights.
+- Reference Frame: Frame 0 (train_early) or First Train Frame (train).
+- Selection: Weighted seed sampling -> N nearest spatial neighbors kept.
+- Output: mask [L] tensor (1.0 = visible, 0.0 = masked).
 
 ## 4. Item Dictionary
 - F: Number of consecutive frames (defined by num_consecutive)
@@ -39,6 +40,7 @@ Each item contains:
 To avoid batching errors, always filter to a single protein:
 - --pep_name: Filter by protein (e.g., "4o66_C"). Default: None. 
 - --replica: Filter by replica (e.g., "1" for _R1). Default: 1.
+- --crop_ratio: Fraction of residues to keep (0.0-1.0). Default: 0.95
 
 ## 6. Sampling
 - num_consecutive: Frames per sample. Changes tensor shape (F dimension). Default: 1.
