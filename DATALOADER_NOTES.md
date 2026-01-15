@@ -2,129 +2,68 @@
 
 ## Overview
 
-The dataset loaders (`dataset_projector.py`, `dataset_predictor.py`, `dataset_interpolator.py`) load molecular dynamics (MD) trajectory data and apply **spatial masking** to remove 5% of residues based on geometric proximity.
+The `MDGenDataset` (in `gen_model/dataset.py`) loads molecular dynamics (MD) trajectory data from ATLAS. It handles data partitioning (training/validation/test), geometric processing, and **spatial masking**.
 
-## Key Features
+## 1. SE(3) Invariance
 
-### 1. Spatial Masking (Induced Subgraph Sampling)
-- **Removes 5% of residues** based on 3D spatial distance from a random seed
-- **Preserves full tensor shapes** - no slicing occurs
-- **Separates concerns**: `mask` controls spatial visibility, `torsion_mask` reflects chemical validity
+SE(3) invariance (independence from global rotation and translation) is achieved through **global superposition** during the preprocessing stage:
 
-### 2. Data Returned
+- **Alignment**: Every frame in the trajectory is aligned to the first frame (`frame 0`) using a least-squares fit.
+- **Selection**: The alignment uses all heavy atoms (`protein and not name H*`).
+- **Consistency**: This ensures that all frames within a `.npy` file are in a shared coordinate system, allowing the model to focus on internal structural changes.
 
-Each `__getitem__` call returns a dictionary with:
+## 2. 4-Way Contiguous Splitting
+
+The dataset supports a 4-way split logic based on simulation time. Simulations are partitioned into four contiguous segments:
+
+| Mode | Range | Description |
+| :--- | :--- | :--- |
+| `train_early` | `[0, train_end)` | **Includes both** early and main training data. |
+| `train` | `[early_end, train_end)` | Main training segment (after the early part). |
+| `val` | `[train_end, val_end)` | Validation segment. |
+| `test` | `[val_end, total_frames)` | Test segment. |
+
+- `early_end` is determined by a nanosecond threshold (default 5ns).
+- `train`, `val`, and `test` segments are partitioned by configurable ratios.
+- The `MDGenDataset` defaults to `mode='train'`.
+
+## 3. Spatial Masking (Induced Subgraph Sampling)
+
+The dataloader implements a spatial masking technique to support generative tasks:
+- **Masking Percentage**: Controlled by `args.crop_ratio` (default `0.95`, i.e., 5% masked).
+- **Mechanism**: A random seed residue is chosen, and the nearest residues (by CA distance in the first frame) are kept.
+- **`mask` tensor**: A `[L]` tensor where `1.0` is visible and `0.0` is masked.
+- **`torsion_mask`**: Reflects chemical validity (e.g., presence of chi angles) and is **not** affected by spatial masking.
+
+## 4. Item Dictionary
+
+Each `__getitem__` call returns:
 
 ```python
 {
-    'name': str,              # Protein name
-    'frame_start': int,       # Starting frame index
-    'torsions': Tensor,       # [Frames, L, 7, 2] - sin/cos of 7 torsion angles
-    'torsion_mask': Tensor,   # [L, 7] - which torsions are chemically valid
-    'trans': Tensor,          # [Frames, L, 3] - CA translations
-    'rots': Tensor,           # [Frames, L, 3, 3] - rotation matrices
-    'seqres': ndarray,        # [L] - amino acid type indices
-    'mask': ndarray,          # [L] - which residues are spatially visible
+    'name': str,              # Protein name (e.g., 4o66_C_R1)
+    'frame_indices': ndarray, # Indices of frames returned
+    'seqres': ndarray,        # Amino acid type indices
+    'mask': ndarray,          # Spatial mask [L]
+    'torsion_mask': Tensor,   # Chemical validity mask [L, 7]
+    'clean_trans': Tensor,    # CA translations [F, L, 3]
+    'clean_rots': Tensor,     # Rotation matrices [F, L, 3, 3]
+    'clean_torsions': Tensor, # Torsion sin/cos [F, L, 7, 2]
+    'clean_atom37': Tensor,   # Full atom coordinates [F, L, 37, 3]
 }
 ```
 
-### 3. Mask Semantics
+## 5. Usage
 
-**`mask` (shape `[L]`)**:
-- `1.0` = residue is spatially visible (kept in 95%)
-- `0.0` = residue is spatially masked (removed 5%)
-- Controls which residues the model should use
-
-**`torsion_mask` (shape `[L, 7]`)**:
-- `1.0` = torsion angle exists for this amino acid
-- `0.0` = torsion angle doesn't exist (e.g., Glycine has no chi angles)
-- **NOT affected by spatial masking** - only reflects chemical validity
-
-### 4. No Data Zeroing
-
-The actual values in `torsions`, `trans`, and `rots` are **preserved** for all residues, including masked ones. Only the `mask` indicates which to ignore.
-
-## Spatial Masking Algorithm
-
-```python
-# 1. Select random seed residue
-seed_idx = np.random.randint(L)
-
-# 2. Compute distances from seed (using CA atoms of first frame)
-ref_coords = atom37[0, :, 1, :]  # [L, 3]
-dists = torch.norm(ref_coords - ref_coords[seed_idx], dim=-1)
-
-# 3. Keep nearest 95% of residues
-keep_len = int(L * 0.95)
-_, keep_indices = torch.topk(dists, k=keep_len, largest=False)
-
-# 4. Create spatial mask
-spatial_mask = torch.zeros(L)
-spatial_mask[keep_indices] = 1.0
-
-# 5. Apply to residue-level mask only
-mask = mask * spatial_mask.cpu().numpy()
-# torsion_mask is NOT modified
-```
-
-## Model Usage
-
-Your model should check the `mask` to ignore spatially masked residues:
-
-```python
-# Simple approach: multiply losses by mask
-loss = criterion(predictions, targets)
-masked_loss = loss * mask  # Zero out loss for masked residues
-final_loss = masked_loss.sum() / mask.sum()
-
-# With torsion_mask for per-torsion losses
-loss = criterion(predictions, targets)  # [L, 7]
-loss = loss * mask.unsqueeze(-1) * torsion_mask
-final_loss = loss.sum() / (mask.sum() * torsion_mask.sum())
-```
-
-## Testing
-
-Run comprehensive tests:
+### Preprocessing
+To download, preprocess, and split a new protein:
 ```bash
-pytest tests/test_dataset.py -v
+python scripts/download_and_prep.py 1a62_A --train_early_ns 50.0 --ratios 0.6 0.2 0.2
 ```
 
-Tests verify:
-- Exactly 5% removal
-- Shape preservation
-- Torsion mask independence
-- No data zeroing
-- Randomness across samples
-- All dataset variants work correctly
-
-## Configuration
-
-Set `crop_ratio` in your args:
+### Loading
 ```python
-args.crop_ratio = 0.95  # Keep 95%, remove 5%
+# The 'split' argument is completely optional.
+# It defaults to 'gen_model/splits/frame_splits.csv'
+dataset = MDGenDataset(args, mode='train')
 ```
-
-Default is `0.95` if not specified.
-
-## Data Preparation
-
-Before loading data, download and preprocess protein trajectories:
-
-```bash
-python scripts/download_and_prep.py 1a62_A
-```
-
-This downloads raw data and preprocesses it into `.npy` format.
-
-## Implementation Notes
-
-### Dependencies Fixed
-- Removed `dm-tree` dependency from `residue_constants.py`
-- Added numpy support to `batched_gather` in `tensor_utils.py`
-
-### Dataset Variants
-All three variants implement identical spatial masking:
-- `dataset_projector.py` - for projection tasks
-- `dataset_predictor.py` - for prediction tasks  
-- `dataset_interpolator.py` - for interpolation tasks

@@ -5,17 +5,30 @@ from .geometry import atom37_to_torsions, atom14_to_atom37, atom14_to_frames
 from .residue_constants import restype_order, RESTYPE_ATOM37_MASK
 
 class MDGenDataset(torch.utils.data.Dataset):
-    def __init__(self, args, split, repeat=1, num_consecutive=1, stride=1):
+    def __init__(self, args, split=None, mode='train', repeat=1, num_consecutive=1, stride=1):
         """
         Args:
             args: Global config object.
-            split: Path to the split CSV.
+            split: Path to the split CSV (optional).
+            mode: Dataset mode ('train', 'val', 'test', 'train_early', or 'all').
             repeat: Oversampling factor.
             num_consecutive: Number of frames to return (1, 2, 3, etc.).
             stride: Gap between the consecutive frames (e.g., stride 2 picks frame 0, 2, 4).
         """
         super().__init__()
         self.args = args
+        self.mode = mode
+        
+        # Determine split file if not provided
+        if split is None:
+            # Check for overrides in args, otherwise use the master split file
+            if mode in ['train', 'train_early']:
+                split = getattr(args, 'train_split', None)
+            elif mode == 'val':
+                split = getattr(args, 'val_split', None)
+            
+            split = split or 'gen_model/splits/frame_splits.csv'
+        
         self.df = pd.read_csv(split, index_col='name')
         
         # Load the sequence mapping from atlas.csv
@@ -37,11 +50,14 @@ class MDGenDataset(torch.utils.data.Dataset):
         # Total span of frames we need to extract per sample
         required_span = (self.num_consecutive - 1) * self.stride + 1
         
+        split_cols = ['train_early_end', 'train_end', 'val_end']
+        has_splits = all(col in self.df.columns for col in split_cols)
+        
+        if not has_splits and self.mode != 'all':
+             print(f"Warning: Split columns missing in split file. Using all frames regardless of mode='{self.mode}'.")
+
         for protein_idx, name in enumerate(self.df.index):
-            # Extract folder name (4o66_C) from filename (4o66_C_R1)
             folder_name = name.split('_R')[0]
-            
-            # Resulting path: ./data/4o66_C/4o66_C_R1.npy
             npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
             
             try:
@@ -51,12 +67,34 @@ class MDGenDataset(torch.utils.data.Dataset):
                 if self.args.frame_interval:
                     num_frames = len(range(0, num_frames, self.args.frame_interval))
                 
-                # Ensure we have enough room for the stride and consecutive count
-                max_start_idx = num_frames - required_span
-                
-                if max_start_idx >= 0:
-                    for frame_idx in range(max_start_idx + 1):
-                        self.frame_index.append((protein_idx, frame_idx))
+                def add_valid_frames(s, e):
+                    max_start_idx = e - required_span
+                    if max_start_idx >= s:
+                        for frame_idx in range(s, max_start_idx + 1):
+                            self.frame_index.append((protein_idx, frame_idx))
+
+                if has_splits and self.mode != 'all':
+                    t_early_e = int(self.df.loc[name, 'train_early_end'])
+                    t_e = int(self.df.loc[name, 'train_end'])
+                    v_e = int(self.df.loc[name, 'val_end'])
+                    
+                    if self.args.frame_interval:
+                        t_early_e //= self.args.frame_interval
+                        t_e //= self.args.frame_interval
+                        v_e //= self.args.frame_interval
+
+                    if self.mode == 'train_early':
+                        # Early + Train (from instruction: randomly return from both)
+                        add_valid_frames(0, t_e)
+                    elif self.mode == 'train':
+                        add_valid_frames(t_early_e, t_e)
+                    elif self.mode == 'val':
+                        add_valid_frames(t_e, v_e)
+                    elif self.mode == 'test':
+                        add_valid_frames(v_e, num_frames)
+                else:
+                    add_valid_frames(0, num_frames)
+
             except Exception as e:
                 print(f"Warning: Could not load {npy_path}: {e}")
                 continue
