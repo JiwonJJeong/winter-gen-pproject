@@ -4,11 +4,20 @@ import pandas as pd
 from .geometry import atom37_to_torsions, atom14_to_atom37, atom14_to_frames
 from .residue_constants import restype_order, RESTYPE_ATOM37_MASK
 
+# SE3 diffusion imports
+from gen_model.rigid_utils import Rigid, Rotation
+try:
+    from openfold.data import data_transforms
+except ImportError:
+    # Fallback if openfold not installed
+    data_transforms = None
+
 class MDGenDataset(torch.utils.data.Dataset):
-    def __init__(self, args, split=None, mode='train', repeat=1, num_consecutive=1, stride=1):
+    def __init__(self, args, diffuser=None, split=None, mode='train', repeat=1, num_consecutive=1, stride=1):
         """
         Args:
             args: Global config object.
+            diffuser: SE3Diffuser instance for applying diffusion noise.
             split: Path to the split CSV (optional).
             mode: Dataset mode ('train', 'val', 'test', 'train_early', or 'all').
             repeat: Oversampling factor.
@@ -18,6 +27,8 @@ class MDGenDataset(torch.utils.data.Dataset):
         super().__init__()
         self.args = args
         self.mode = mode
+        self._diffuser = diffuser
+        self._is_training = mode in ['train', 'train_early']
         
         # Determine split file if not provided
         if split is None:
@@ -193,9 +204,10 @@ class MDGenDataset(torch.utils.data.Dataset):
             if self.args.frame_interval: 
                 arr = arr[::self.args.frame_interval]
 
-        # 2. Extract Strided Frames
+        # 2. Extract Strided Frames (use first frame for single-frame training)
         indices = [frame_start + i * self.stride for i in range(self.num_consecutive)]
         clean_frames = np.copy(arr[indices]).astype(np.float32) 
+        frame_idx = 0  # Use first frame for SE3 diffusion
 
         # 3. Process Geometry
         seqres_encoded = np.array([restype_order[c] for c in seqres])
@@ -227,15 +239,89 @@ class MDGenDataset(torch.utils.data.Dataset):
             spatial_mask[keep_indices] = 1.0
             mask = mask * spatial_mask.numpy()
 
-        # 5. Output Dictionary
-        return {
+        # 5. Convert to Rigid format for SE3 diffusion
+        clean_rigids = Rigid(
+            rots=Rotation(rot_mats=frames._rots._rot_mats[frame_idx]),
+            trans=frames._trans[frame_idx]
+        )
+        
+        # 6. Apply SE3 diffusion if diffuser is provided
+        if self._diffuser is not None:
+            # Sample time step
+            if self._is_training:
+                t = np.random.uniform(getattr(self.args, 'min_t', 0.01), 1.0)
+            else:
+                t = 1.0  # Full noise for validation
+            
+            # Apply diffusion
+            diff_feats = self._diffuser.forward_marginal(
+                rigids_0=clean_rigids,
+                t=t,
+                diffuse_mask=torch.from_numpy(mask)
+            )
+        else:
+            # No diffusion - just use clean structures
+            t = 0.0
+            diff_feats = {
+                'rigids_t': clean_rigids.to_tensor_7(),
+                'rot_score': torch.zeros(L, 3),
+                'trans_score': torch.zeros(L, 3),
+                'rot_score_scaling': torch.tensor(1.0),
+                'trans_score_scaling': torch.tensor(1.0),
+            }
+        
+        # 7. Prepare atom representations using openfold transforms if available
+        aatype_tensor = aatype[frame_idx]
+        atom14_pos = torch.from_numpy(clean_frames[frame_idx]).float()
+        
+        if data_transforms is not None:
+            # Use openfold data transforms for proper atom14/atom37 handling
+            chain_feats = {
+                'aatype': aatype_tensor,
+                'all_atom_positions': atom37[frame_idx].double(),
+                'all_atom_mask': (atom37[frame_idx] != 0).any(dim=-1).double()
+            }
+            chain_feats = data_transforms.make_atom14_masks(chain_feats)
+            chain_feats = data_transforms.make_atom14_positions(chain_feats)
+            
+            residx_atom14_to_atom37 = chain_feats['residx_atom14_to_atom37']
+            atom37_mask = chain_feats['all_atom_mask']
+            atom14_pos = chain_feats['atom14_gt_positions']
+        else:
+            # Fallback: use residue constants
+            atom37_mask = torch.from_numpy(RESTYPE_ATOM37_MASK[aatype_tensor.numpy()])
+            residx_atom14_to_atom37 = torch.zeros(L, 14, dtype=torch.long)
+        
+        # 8. Build final feature dictionary for SE3 diffusion model
+        output = {
+            # Core identifiers
+            'aatype': aatype_tensor,
+            'seq_idx': torch.arange(1, L + 1),  # 1-indexed
+            'chain_idx': torch.ones(L),  # Single chain
+            'res_mask': torch.from_numpy(mask).float(),
+            'fixed_mask': torch.zeros(L),  # No motifs (all residues diffused)
+            
+            # Ground truth structure (t=0)
+            'rigids_0': clean_rigids.to_tensor_7(),
+            'atom37_pos': atom37[frame_idx],
+            'atom14_pos': atom14_pos,
+            'torsion_angles_sin_cos': torsions[frame_idx],
+            
+            # Noised structure (at time t) - from diffuser
+            **diff_feats,
+            't': t,
+            
+            # Self-conditioning (initially zeros)
+            'sc_ca_t': torch.zeros(L, 3),
+            
+            # Metadata
+            'residx_atom14_to_atom37': residx_atom14_to_atom37,
+            'atom37_mask': atom37_mask,
+            'residue_index': torch.arange(L),
+            
+            # Original custom fields (for tracking/debugging)
             'name': full_name,
             'frame_indices': np.array(indices),
-            'seqres': seqres_encoded,
-            'mask': mask,
-            'torsion_mask': torsion_mask[0], 
-            'clean_trans': frames._trans,
-            'clean_rots': frames._rots._rot_mats,
-            'clean_torsions': torsions,
-            'clean_atom37': atom37,
         }
+        
+        return output
