@@ -1,0 +1,200 @@
+"""Training script for SE(3) diffusion on MD trajectory data.
+
+This script uses the MDGenDataset with SE3Diffuser to train a score network.
+Adapted from experiments/train_se3_diffusion.py
+"""
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from omegaconf import OmegaConf
+import sys
+import os
+sys.path.insert(0, '.')
+
+from gen_model.dataset import MDGenDataset
+from gen_model.diffusion.se3_diffuser import SE3Diffuser
+from model.score_network import ScoreNetwork
+
+
+def create_se3_diffuser():
+    """Create SE3Diffuser with default configuration."""
+    se3_conf = OmegaConf.create({
+        'diffuse_rot': True,
+        'diffuse_trans': True,
+        'so3': {
+            'schedule': 'logarithmic',
+            'min_sigma': 0.1,
+            'max_sigma': 1.5,
+            'num_sigma': 1000,
+            'cache_dir': './',
+        },
+        'r3': {
+            'min_b': 0.1,
+            'max_b': 20.0,
+            'coordinate_scaling': 0.1,
+        }
+    })
+    return SE3Diffuser(se3_conf)
+
+
+def create_model(diffuser):
+    """Create ScoreNetwork model."""
+    model_conf = OmegaConf.create({
+        'node_embed_size': 256,
+        'edge_embed_size': 128,
+        'embed': {
+            'index_embed_size': 32,
+            'embed_self_conditioning': False,  # Start without self-conditioning
+            'num_bins': 22,
+            'min_bin': 1e-5,
+            'max_bin': 20.0,
+        },
+        # IPA configuration
+        'ipa': {
+            'c_s': 256,
+            'c_z': 128,
+            'c_hidden': 128,
+            'no_heads': 8,
+            'no_qk_points': 8,
+            'no_v_points': 12,
+        },
+        'num_blocks': 4,  # Number of IPA blocks
+    })
+    
+    return ScoreNetwork(model_conf, diffuser)
+
+
+def train_step(model, batch, optimizer):
+    """Single training step."""
+    optimizer.zero_grad()
+    
+    # Forward pass
+    output = model(batch)
+    
+    # Compute loss (MSE on rotation and translation scores)
+    rot_loss = torch.mean(
+        (output['rot_score'] - batch['rot_score']) ** 2 * batch['res_mask'][..., None]
+    )
+    trans_loss = torch.mean(
+        (output['trans_score'] - batch['trans_score']) ** 2 * batch['res_mask'][..., None]
+    )
+    
+    loss = rot_loss + trans_loss
+    
+    # Backward pass
+    loss.backward()
+    optimizer.step()
+    
+    return {
+        'loss': loss.item(),
+        'rot_loss': rot_loss.item(),
+        'trans_loss': trans_loss.item(),
+    }
+
+
+def main():
+    """Main training loop."""
+    
+    # Configuration
+    config = OmegaConf.create({
+        'data': {
+            'data_dir': 'data',
+            'atlas_csv': 'data/atlas.csv',
+            'train_split': 'gen_model/splits/frame_splits.csv',
+            'suffix': '_latent',
+            'frame_interval': None,
+            'crop_ratio': 0.95,
+            'min_t': 0.01,
+        },
+        'training': {
+            'batch_size': 4,
+            'num_epochs': 100,
+            'learning_rate': 1e-4,
+            'num_workers': 4,
+        },
+        'checkpoint': {
+            'save_dir': 'checkpoints',
+            'save_every': 10,  # Save every N epochs
+        }
+    })
+    
+    # Create diffuser
+    print("Creating SE3Diffuser...")
+    diffuser = create_se3_diffuser()
+    
+    # Create dataset
+    print("Creating dataset...")
+    dataset = MDGenDataset(
+        args=config.data,
+        diffuser=diffuser,
+        split=config.data.train_split,
+        mode='train',
+        repeat=1,
+        num_consecutive=1,
+        stride=1
+    )
+    print(f"Dataset size: {len(dataset)}")
+    
+    # Create dataloader
+    dataloader = DataLoader(
+        dataset,
+        batch_size=config.training.batch_size,
+        shuffle=True,
+        num_workers=config.training.num_workers,
+        pin_memory=True,
+    )
+    
+    # Create model
+    print("Creating model...")
+    model = create_model(diffuser)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    print(f"Model on device: {device}")
+    
+    # Create optimizer
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.training.learning_rate)
+    
+    # Training loop
+    print("\nStarting training...")
+    os.makedirs(config.checkpoint.save_dir, exist_ok=True)
+    
+    for epoch in range(config.training.num_epochs):
+        model.train()
+        epoch_losses = []
+        
+        for batch_idx, batch in enumerate(dataloader):
+            # Move batch to device
+            batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+            
+            # Training step
+            losses = train_step(model, batch, optimizer)
+            epoch_losses.append(losses['loss'])
+            
+            if batch_idx % 10 == 0:
+                print(f"Epoch {epoch+1}/{config.training.num_epochs} | "
+                      f"Batch {batch_idx}/{len(dataloader)} | "
+                      f"Loss: {losses['loss']:.4f} | "
+                      f"Rot: {losses['rot_loss']:.4f} | "
+                      f"Trans: {losses['trans_loss']:.4f}")
+        
+        # Epoch summary
+        avg_loss = sum(epoch_losses) / len(epoch_losses)
+        print(f"\nEpoch {epoch+1} completed | Avg Loss: {avg_loss:.4f}\n")
+        
+        # Save checkpoint
+        if (epoch + 1) % config.checkpoint.save_every == 0:
+            checkpoint_path = os.path.join(
+                config.checkpoint.save_dir,
+                f'checkpoint_epoch_{epoch+1}.pt'
+            )
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_loss,
+            }, checkpoint_path)
+            print(f"Saved checkpoint: {checkpoint_path}")
+
+
+if __name__ == '__main__':
+    main()

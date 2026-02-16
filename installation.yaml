@@ -25,3 +25,9 @@ dependencies:
     - wandb
     - dm-tree
     - biopython
+    - omegaconf
+    - openfold
+    - fair-esm
+    - hydra-core
+    - biotite
+    - GPUtil

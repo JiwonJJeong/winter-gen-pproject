@@ -27,7 +27,8 @@ from data import residue_constants
 from typing import Dict
 from experiments import train_se3_diffusion
 from omegaconf import DictConfig, OmegaConf
-from openfold.data import data_transforms
+from gen_model.geometry import atom14_to_frames, atom37_to_torsions, atom14_to_atom37
+from gen_model.residue_constants import RESTYPE_ATOM37_MASK
 import esm
 
 
@@ -40,10 +41,27 @@ def process_chain(design_pdb_feats):
         'all_atom_positions': torch.tensor(design_pdb_feats['atom_positions']).double(),
         'all_atom_mask': torch.tensor(design_pdb_feats['atom_mask']).double()
     }
-    chain_feats = data_transforms.atom37_to_frames(chain_feats)
-    chain_feats = data_transforms.make_atom14_masks(chain_feats)
-    chain_feats = data_transforms.make_atom14_positions(chain_feats)
-    chain_feats = data_transforms.atom37_to_torsion_angles()(chain_feats)
+    
+    # Convert atom37 to atom14 first
+    aatype = chain_feats['aatype']
+    atom14_pos, atom14_mask = atom37_to_atom14(
+        chain_feats['all_atom_positions'], aatype, chain_feats['all_atom_mask']
+    )
+    
+    # Convert atom14 to frames
+    frames = atom14_to_frames(atom14_pos)
+    
+    # Convert atom37 to torsion angles
+    torsions, torsion_mask = atom37_to_torsions(chain_feats['all_atom_positions'], aatype)
+    
+    chain_feats.update({
+        'frames': frames,
+        'atom14_pos': atom14_pos,
+        'atom14_mask': atom14_mask,
+        'torsion_angles_sin_cos': torsions,
+        'torsion_mask': torsion_mask
+    })
+    
     seq_idx = design_pdb_feats['residue_index'] - np.min(design_pdb_feats['residue_index']) + 1
     chain_feats['seq_idx'] = seq_idx
     chain_feats['res_mask'] = design_pdb_feats['bb_mask']
