@@ -3,6 +3,22 @@ import numpy as np
 import pandas as pd
 from .geometry import atom37_to_torsions, atom14_to_atom37, atom14_to_frames
 from .residue_constants import restype_order, RESTYPE_ATOM37_MASK
+from types import SimpleNamespace
+
+
+def _plain_args(args):
+    """Convert OmegaConf DictConfig to a SimpleNamespace at the boundary.
+
+    The DictConfig stays in the caller (notebook); inside dataset code we use
+    a plain object that accepts any value type without OmegaConf validation."""
+    try:
+        from omegaconf import DictConfig, OmegaConf
+        if isinstance(args, DictConfig):
+            return SimpleNamespace(**OmegaConf.to_container(args, resolve=True))
+    except ImportError:
+        pass
+    return args
+
 
 # SE3 diffusion
 import numpy as np
@@ -29,7 +45,7 @@ class MDGenDataset(torch.utils.data.Dataset):
             stride: Gap between the consecutive frames (e.g., stride 2 picks frame 0, 2, 4).
         """
         super().__init__()
-        self.args = args
+        self.args = _plain_args(args)
         self.mode = mode
         self._diffuser = diffuser
         self._is_training = mode in ['train', 'train_early']
@@ -61,18 +77,13 @@ class MDGenDataset(torch.utils.data.Dataset):
         self.balanced_weights = {}
         self._build_frame_index()
         
-        # Calculate or load coordination scale factor.
-        # Use __dict__ to bypass any custom __setattr__ that routes through OmegaConf.
-        coord_scale = getattr(args, 'coord_scale', None)
-        if coord_scale is not None:
-             coord_scale = float(coord_scale) # Final cast on creation to avoid OmegaConf float32 issues
-             
-        if coord_scale is None:
+        # Calculate or load coordination scale factor
+        self.coord_scale = getattr(self.args, 'coord_scale', None)
+        if self.coord_scale is None:
             if self.mode in ['train', 'train_early']:
-                coord_scale = self._compute_coord_scale()
+                self.coord_scale = self._compute_coord_scale()
             else:
-                coord_scale = 0.1
-        self.__dict__['coord_scale'] = float(coord_scale)
+                self.coord_scale = 0.1
 
         print(f"Dataset {mode} mode: coord_scale = {self.coord_scale:.4f}")
 
@@ -384,35 +395,31 @@ class MDGenDataset(torch.utils.data.Dataset):
 class MDGenDataModule(L.LightningDataModule):
     def __init__(self, args, diffuser=None, batch_size=32, num_workers=4):
         super().__init__()
-        self.args = args
+        self.args = _plain_args(args)
         self.diffuser = diffuser
         self.batch_size = batch_size
         self.num_workers = num_workers
-        # Use __dict__ to bypass Lightning's __setattr__ which routes
-        # through OmegaConf and rejects numpy types like float32.
-        self.__dict__['coord_scale'] = None
+        self.coord_scale = None
 
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
             # 1. Initialize training dataset to compute scale if needed
-            train_ds = MDGenDataset(
+            self.train_dataset = MDGenDataset(
                 args=self.args,
                 diffuser=self.diffuser,
                 split=self.args.train_split,
                 mode='train'
             )
-            self.__dict__['coord_scale'] = float(train_ds.coord_scale)
-            self.__dict__['train_dataset'] = train_ds
+            self.coord_scale = float(self.train_dataset.coord_scale)
 
             # 2. Create validation dataset, then override coord_scale to match train
-            val_ds = MDGenDataset(
+            self.val_dataset = MDGenDataset(
                 args=self.args,
                 diffuser=self.diffuser,
                 split=self.args.train_split,
                 mode='val'
             )
-            val_ds.__dict__['coord_scale'] = float(self.__dict__['coord_scale'])
-            self.__dict__['val_dataset'] = val_ds
+            self.val_dataset.coord_scale = float(self.coord_scale)
 
     def train_dataloader(self):
         return DataLoader(
