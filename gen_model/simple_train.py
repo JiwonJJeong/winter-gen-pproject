@@ -207,10 +207,16 @@ def train_ddpm(
     save_dir='checkpoints/simple_ddpm',
     save_every=10
 ):
-    """Train DDPM model.
+    """Train DDPM model with spatial masking support.
+
+    Spatial Masking:
+        - If dataset provides 'res_mask' or 'mask', applies spatial masking
+        - Masked residues (mask=0) are replaced with random noise (not visible to model)
+        - Loss is computed only on visible residues (mask=1)
+        - This improves generalization and removes edge bias in training
 
     Args:
-        dataset: Dataset instance
+        dataset: Dataset instance (should provide 'res_mask' if using spatial masking)
         model: Denoising model
         diffusion: SimpleDDPM instance
         device: Device to train on
@@ -261,20 +267,41 @@ def train_ddpm(
             if len(x_0.shape) == 4:
                 x_0 = x_0.reshape(batch_size_actual, x_0.shape[1], -1)
 
+            # Get spatial mask (1 = visible, 0 = masked)
+            if 'res_mask' in batch:
+                mask = batch['res_mask'].to(device)  # [B, L]
+            elif 'mask' in batch:
+                mask = batch['mask'].to(device)  # [B, L]
+            else:
+                # No mask provided - use all residues
+                mask = torch.ones(batch_size_actual, x_0.shape[1], device=device)
+
+            mask_expanded = mask.unsqueeze(-1)  # [B, L, 1] for broadcasting
+
             # Sample random timesteps
             t = torch.randint(0, diffusion.timesteps, (batch_size_actual,), device=device)
 
-            # Generate noise
+            # Generate noise for visible residues
             noise = torch.randn_like(x_0)
 
-            # Add noise to get x_t
+            # Add noise to get x_t (for visible residues)
             x_t = diffusion.add_noise(x_0, t, noise)
 
-            # Predict noise
+            # Replace masked residues with independent random noise
+            # This prevents the model from using masked residues as information
+            noise_masked = torch.randn_like(x_0) * (1 - mask_expanded)
+            x_t = mask_expanded * x_t + noise_masked
+
+            # Predict noise (model doesn't know which residues are masked)
             pred_noise = model(x_t, t)
 
-            # Compute loss (MSE between predicted and actual noise)
-            loss = F.mse_loss(pred_noise, noise)
+            # Compute loss ONLY on visible residues
+            loss_per_element = F.mse_loss(pred_noise, noise, reduction='none')
+            masked_loss = loss_per_element * mask_expanded
+
+            # Normalize by number of visible elements
+            num_visible = mask.sum() * x_0.shape[-1] + 1e-8
+            loss = masked_loss.sum() / num_visible
 
             # Backward pass
             optimizer.zero_grad()
