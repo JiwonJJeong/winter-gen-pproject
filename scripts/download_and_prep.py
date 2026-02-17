@@ -29,10 +29,21 @@ def download_protein(name, data_dir, redownload=False):
     try:
         response = requests.get(url, stream=True)
         response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        block_size = 1024 * 1024 # 1MB chunk size to reduce buffer overhead on networked Drive
+        
+        progress_bar = tqdm.tqdm(total=total_size, unit='iB', unit_scale=True, desc=f"Protein Zip")
+        
         with open(zip_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+            for chunk in response.iter_content(chunk_size=block_size):
+                if chunk:
+                    f.write(chunk)
+                    progress_bar.update(len(chunk))
+        progress_bar.close()
+
     except Exception as e:
+        if 'progress_bar' in locals(): progress_bar.close()
         print(f"Failed to download {name}: {e}")
         return
 
