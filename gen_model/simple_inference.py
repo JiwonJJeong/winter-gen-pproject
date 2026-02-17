@@ -265,12 +265,13 @@ def main():
 
     if len(sample_data.shape) == 3:
         n_residues = sample_data.shape[0]
-        in_channels = sample_data.shape[1] * sample_data.shape[2]
+        in_channels = n_residues * sample_data.shape[1] * sample_data.shape[2]
     else:
         n_residues = sample_data.shape[0]
-        in_channels = sample_data.shape[1]
+        in_channels = n_residues * sample_data.shape[1]
 
     # Create model and diffusion
+    # Use total flattened dimension: in_channels + time_emb_dim
     model = SimpleDenoiseModel(in_channels=in_channels, hidden_dim=256, time_emb_dim=128)
     diffusion = SimpleDDPM(timesteps=1000, beta_start=0.0001, beta_end=0.02)
     diffusion = diffusion.to(device)

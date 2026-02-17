@@ -96,7 +96,7 @@ class SimpleDenoiseModel(nn.Module):
         """Initialize model.
 
         Args:
-            in_channels: Number of input channels (e.g., 3*14 for 14 atoms with xyz coords)
+            in_channels: Total number of input channels (e.g., N_res * N_atoms * 3 for N_res residues)
             hidden_dim: Hidden dimension size
             time_emb_dim: Timestep embedding dimension
         """
@@ -370,16 +370,17 @@ def main():
     if len(sample_data.shape) == 3:
         # [N_res, N_atoms, 3]
         n_residues = sample_data.shape[0]
-        in_channels = sample_data.shape[1] * sample_data.shape[2]
+        in_channels = n_residues * sample_data.shape[1] * sample_data.shape[2]
     else:
         # [N_res, 3] or [N_res, C]
         n_residues = sample_data.shape[0]
-        in_channels = sample_data.shape[1]
+        in_channels = n_residues * sample_data.shape[1]
 
     print(f'Input shape: {sample_data.shape}')
     print(f'Flattened input channels: {in_channels}')
 
     # Create model and diffusion
+    # Use total flattened dimension: in_channels + time_emb_dim
     model = SimpleDenoiseModel(in_channels=in_channels, hidden_dim=256, time_emb_dim=128)
     diffusion = SimpleDDPM(timesteps=1000, beta_start=0.0001, beta_end=0.02)
 
