@@ -104,7 +104,7 @@ class MDGenDataset(torch.utils.data.Dataset):
             
         all_ca = np.concatenate(ca_coords, axis=0) # [N_sampled * L, 3]
         std = np.std(all_ca)
-        return 1.0 / (std + 1e-8)
+        return float(1.0 / (std + 1e-8))
 
     def _build_frame_index(self):
         self.frame_index = []
@@ -402,7 +402,7 @@ class MDGenDataModule(L.LightningDataModule):
             # because MDGenDataset reads getattr(args, 'coord_scale', None)
             from omegaconf import OmegaConf
             val_args = OmegaConf.create(OmegaConf.to_container(self.args))
-            val_args.coord_scale = self.coord_scale
+            val_args.coord_scale = float(self.coord_scale)
 
             self.val_dataset = MDGenDataset(
                 args=val_args,
@@ -410,7 +410,7 @@ class MDGenDataModule(L.LightningDataModule):
                 split=self.args.train_split,
                 mode='val'
             )
-            self.val_dataset.coord_scale = self.coord_scale # Redundant but safe
+            self.val_dataset.coord_scale = float(self.coord_scale) # Redundant but safe
 
     def train_dataloader(self):
         return DataLoader(
