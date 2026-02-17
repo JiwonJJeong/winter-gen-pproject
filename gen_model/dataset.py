@@ -167,12 +167,12 @@ class MDGenDataset(torch.utils.data.Dataset):
         return w.numpy()
     
     def __len__(self):
-        if self.args.overfit_peptide: return 1000
+        if getattr(self.args, 'overfit_peptide', None): return 1000
         return len(self.frame_index)
 
     def __getitem__(self, idx):
         # 1. Resolve Protein and Starting Frame
-        if self.args.overfit_peptide:
+        if getattr(self.args, 'overfit_peptide', None):
             name = self.args.overfit_peptide
             full_name = name 
             folder_name = name.split('_R')[0]
