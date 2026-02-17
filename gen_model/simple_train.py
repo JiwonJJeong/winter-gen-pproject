@@ -12,12 +12,17 @@ Usage:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import numpy as np
 import os
+import argparse
 from tqdm import tqdm
+from omegaconf import OmegaConf
+import lightning as L
+from lightning.pytorch.callbacks import ModelCheckpoint
+from torch.utils.data import DataLoader
 
 
+# Base classes from original code
 class SimpleDDPM:
     """Basic DDPM implementation for frame denoising."""
 
@@ -196,213 +201,135 @@ class SimpleDenoiseModel(nn.Module):
         return out
 
 
-def train_ddpm(
-    dataset,
-    model,
-    diffusion,
-    device='cuda',
-    batch_size=4,
-    num_epochs=100,
-    lr=1e-4,
-    save_dir='checkpoints/simple_ddpm',
-    save_every=10
-):
-    """Train DDPM model with spatial masking support.
+class DDPMModule(L.LightningModule):
+    def __init__(self, in_channels, lr=1e-4, timesteps=1000, coord_scale=0.1):
+        super().__init__()
+        self.save_hyperparameters()
+        self.model = SimpleDenoiseModel(in_channels=in_channels)
+        self.diffusion = SimpleDDPM(timesteps=timesteps)
+        self.lr = lr
+        self.coord_scale = coord_scale
 
-    Spatial Masking:
-        - If dataset provides 'res_mask' or 'mask', applies spatial masking
-        - Masked residues (mask=0) are replaced with random noise (not visible to model)
-        - Loss is computed only on visible residues (mask=1)
-        - This improves generalization and removes edge bias in training
+    def forward(self, x, t):
+        return self.model(x, t)
 
-    Args:
-        dataset: Dataset instance (should provide 'res_mask' if using spatial masking)
-        model: Denoising model
-        diffusion: SimpleDDPM instance
-        device: Device to train on
-        batch_size: Batch size
-        num_epochs: Number of training epochs
-        lr: Learning rate
-        save_dir: Directory to save checkpoints
-        save_every: Save checkpoint every N epochs
-    """
-    os.makedirs(save_dir, exist_ok=True)
+    def training_step(self, batch, batch_idx):
+        if 'atom14_pos' in batch:
+            x_0 = batch['atom14_pos']
+        elif 'rigids_0' in batch:
+            x_0 = batch['rigids_0'][..., 4:]
+        else:
+            raise ValueError("Batch must contain 'atom14_pos' or 'rigids_0'")
 
-    # Move model and diffusion to device
-    model = model.to(device)
-    diffusion = diffusion.to(device)
+        # Flatten if needed
+        # Expected model input is [B, N, C]
+        if len(x_0.shape) == 4:
+            # [B, N_res, N_atoms, 3] -> [B, N_res, 14*3]
+            x_0 = x_0.reshape(x_0.shape[0], x_0.shape[1], -1)
 
-    # Optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        batch_size, n_residues, channels = x_0.shape
 
-    # DataLoader
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=True
-    )
+        # Sample noise and timesteps
+        t = torch.randint(0, self.diffusion.timesteps, (batch_size,), device=self.device).long()
+        noise = torch.randn_like(x_0)
 
-    # Training loop
-    model.train()
-    for epoch in range(num_epochs):
-        epoch_loss = 0.0
-        progress_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{num_epochs}')
+        # Add noise
+        x_t = self.diffusion.add_noise(x_0, t, noise)
 
-        for batch_idx, batch in enumerate(progress_bar):
-            # Get frame data (assuming batch contains 'atom14_pos' or similar)
-            # Shape: [B, N_res, N_atoms, 3] or [B, N_res*N_atoms*3]
-            if 'atom14_pos' in batch:
-                x_0 = batch['atom14_pos'].to(device)
-            elif 'rigids_0' in batch:
-                # Extract translations from rigids
-                x_0 = batch['rigids_0'][..., 4:].to(device)
-            else:
-                raise ValueError("Batch must contain 'atom14_pos' or 'rigids_0'")
-
-            batch_size_actual = x_0.shape[0]
-
-            # Flatten to [B, N, C] format if needed
-            if len(x_0.shape) == 4:
-                x_0 = x_0.reshape(batch_size_actual, x_0.shape[1], -1)
-
-            # Get spatial mask (1 = visible, 0 = masked)
-            if 'res_mask' in batch:
-                mask = batch['res_mask'].to(device)  # [B, L]
-            elif 'mask' in batch:
-                mask = batch['mask'].to(device)  # [B, L]
-            else:
-                # No mask provided - use all residues
-                mask = torch.ones(batch_size_actual, x_0.shape[1], device=device)
-
-            mask_expanded = mask.unsqueeze(-1)  # [B, L, 1] for broadcasting
-
-            # Sample random timesteps
-            t = torch.randint(0, diffusion.timesteps, (batch_size_actual,), device=device)
-
-            # Generate noise for visible residues
-            noise = torch.randn_like(x_0)
-
-            # Add noise to get x_t (for visible residues)
-            x_t = diffusion.add_noise(x_0, t, noise)
-
+        # Restore Masked Residue Logic
+        if 'res_mask' in batch or 'mask' in batch:
+            mask = batch.get('res_mask', batch.get('mask'))
+            mask_expanded = mask.unsqueeze(-1) # [B, N, 1]
+            
             # Replace masked residues with independent random noise
-            # This prevents the model from using masked residues as information
             noise_masked = torch.randn_like(x_0) * (1 - mask_expanded)
             x_t = mask_expanded * x_t + noise_masked
-
-            # Predict noise (model doesn't know which residues are masked)
-            pred_noise = model(x_t, t)
-
-            # Compute loss ONLY on visible residues
+            
+            # Predict noise
+            pred_noise = self.model(x_t, t)
+            
+            # Compute loss only on visible residues
             loss_per_element = F.mse_loss(pred_noise, noise, reduction='none')
             masked_loss = loss_per_element * mask_expanded
-
+            
             # Normalize by number of visible elements
-            num_visible = mask.sum() * x_0.shape[-1] + 1e-8
+            num_visible = mask.sum() * channels + 1e-8
             loss = masked_loss.sum() / num_visible
+        else:
+            # No mask, standard MSE
+            pred_noise = self.model(x_t, t)
+            loss = F.mse_loss(noise, pred_noise)
+        
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        return loss
 
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            epoch_loss += loss.item()
-            progress_bar.set_postfix({'loss': loss.item()})
-
-        avg_loss = epoch_loss / len(dataloader)
-        print(f'Epoch {epoch+1}/{num_epochs} - Average Loss: {avg_loss:.6f}')
-
-        # Save checkpoint
-        if (epoch + 1) % save_every == 0:
-            checkpoint_path = os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pt')
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_loss,
-                'coord_scale': dataset.coord_scale
-            }
-            torch.save(checkpoint, checkpoint_path)
-            print(f'Saved checkpoint: {checkpoint_path}')
-
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.lr)
 
 def main():
-    """Main training function."""
-    # Configuration
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f'Using device: {device}')
+    """Main training entry point."""
+    parser = argparse.ArgumentParser(description='DDPM Training with Lightning')
+    parser.add_argument('--data_dir', type=str, default='data', help='Data directory')
+    parser.add_argument('--atlas_csv', type=str, default='data/atlas.csv', help='Atlas CSV file')
+    parser.add_argument('--train_split', type=str, default='gen_model/splits/frame_splits.csv', help='Split file')
+    parser.add_argument('--suffix', type=str, default='_latent', help='Suffix for npy files')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--save_dir', type=str, default='checkpoints/simple_ddpm', help='Save directory')
+    parser.add_argument('--timesteps', type=int, default=1000, help='Diffusion timesteps')
+    args = parser.parse_args()
 
-    # Create dataset
-    from gen_model.dataset import MDGenDataset
-    from omegaconf import OmegaConf
+    os.makedirs(args.save_dir, exist_ok=True)
 
-    args = OmegaConf.create({
-        'data_dir': 'data',
-        'atlas_csv': 'data/atlas.csv',
-        'train_split': 'gen_model/splits/frame_splits.csv',
-        'suffix': '_latent',
-        'frame_interval': None,
-        'crop_ratio': 0.95,
-        'min_t': 0.01,
-    })
+    # 1. Initialize DataModule
+    from gen_model.dataset import MDGenDataModule
+    datamodule = MDGenDataModule(args, batch_size=args.batch_size)
+    datamodule.setup() 
 
-    dataset = MDGenDataset(
-        args=args,
-        diffuser=None,  # No SE3 diffuser needed for basic DDPM
-        split=args.train_split,
-        mode='train',
-        repeat=1,
-        num_consecutive=1,
-        stride=1
-    )
-
-    print(f'Dataset size: {len(dataset)}')
-
-    # Get sample to determine input dimensions
-    sample = dataset[0]
+    # 2. Determine in_channels from a sample
+    sample = datamodule.train_dataset[0]
     if 'atom14_pos' in sample:
         sample_data = sample['atom14_pos']
-    elif 'rigids_0' in sample:
-        sample_data = sample['rigids_0'][..., 4:]
     else:
-        raise ValueError("Sample must contain 'atom14_pos' or 'rigids_0'")
+        sample_data = sample['rigids_0'][..., 4:]
 
     if len(sample_data.shape) == 3:
-        # [N_res, N_atoms, 3]
+        # [N_res, N_atoms, 3] -> total flattened
         n_residues = sample_data.shape[0]
         in_channels = n_residues * sample_data.shape[1] * sample_data.shape[2]
     else:
-        # [N_res, 3] or [N_res, C]
         n_residues = sample_data.shape[0]
         in_channels = n_residues * sample_data.shape[1]
 
-    print(f'Input shape: {sample_data.shape}')
-    print(f'Flattened input channels: {in_channels}')
-
-    # Create model and diffusion
-    # Use total flattened dimension: in_channels + time_emb_dim
-    model = SimpleDenoiseModel(in_channels=in_channels, hidden_dim=256, time_emb_dim=128)
-    diffusion = SimpleDDPM(timesteps=1000, beta_start=0.0001, beta_end=0.02)
-
-    print(f'Model parameters: {sum(p.numel() for p in model.parameters())}')
-
-    # Train
-    train_ddpm(
-        dataset=dataset,
-        model=model,
-        diffusion=diffusion,
-        device=device,
-        batch_size=8,
-        num_epochs=100,
-        lr=1e-4,
-        save_dir='checkpoints/simple_ddpm',
-        save_every=10
+    # 3. Initialize Model
+    model = DDPMModule(
+        in_channels=in_channels,
+        lr=args.lr,
+        timesteps=args.timesteps,
+        coord_scale=datamodule.coord_scale
     )
 
-    print('Training complete!')
+    # 4. Set up Callbacks
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=args.save_dir,
+        filename='ddpm-{epoch:02d}-{train_loss:.4f}',
+        save_top_k=3,
+        monitor='train_loss',
+        mode='min',
+        save_last=True
+    )
 
+    # 5. Training
+    trainer = L.Trainer(
+        max_epochs=args.epochs,
+        accelerator="auto",
+        devices="auto",
+        callbacks=[checkpoint_callback],
+        precision="16-mixed" if torch.cuda.is_available() else 32
+    )
+
+    trainer.fit(model, datamodule=datamodule)
 
 if __name__ == '__main__':
     main()

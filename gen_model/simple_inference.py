@@ -131,23 +131,44 @@ def denoise_frame(model, diffusion, noisy_frame, num_steps=None, device='cuda'):
 
 
 def load_checkpoint(checkpoint_path, model, device='cuda'):
-    """Load model from checkpoint.
-
+    """Load model from checkpoint (supports both vanilla and Lightning).
+    
     Args:
         checkpoint_path: Path to checkpoint file
         model: Model instance
         device: Device to load on
 
     Returns:
-        Loaded model, epoch number, loss
+        Loaded model, epoch number, loss, coord_scale
     """
     model = model.to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])    
-    epoch = checkpoint['epoch']
+    
+    # Lightning checkpoints have 'state_dict' and keys are prefixed with 'model.'
+    if 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+        # Strip 'model.' prefix
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('model.'):
+                new_state_dict[k[6:]] = v
+            else:
+                new_state_dict[k] = v
+        model.load_state_dict(new_state_dict)
+    else:
+        # Vanilla checkpoint
+        model.load_state_dict(checkpoint['model_state_dict'])    
+    
+    epoch = checkpoint.get('epoch', 0)
     loss = checkpoint.get('loss', None)
-    coord_scale = checkpoint.get('coord_scale', 0.1)
-
+    
+    # Get coord_scale from various possible locations
+    coord_scale = checkpoint.get('coord_scale')
+    if coord_scale is None and 'hyper_parameters' in checkpoint:
+        coord_scale = checkpoint['hyper_parameters'].get('coord_scale')
+    if coord_scale is None:
+        coord_scale = 0.1 # Default fallback
+        
     print(f'Loaded checkpoint from epoch {epoch}')
     if loss is not None:
         print(f'Checkpoint loss: {loss:.6f}')

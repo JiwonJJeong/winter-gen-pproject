@@ -4,7 +4,11 @@ import pandas as pd
 from .geometry import atom37_to_torsions, atom14_to_atom37, atom14_to_frames
 from .residue_constants import restype_order, RESTYPE_ATOM37_MASK
 
-# SE3 diffusion imports
+# SE3 diffusion
+import numpy as np
+import lightning as L
+from torch.utils.data import DataLoader
+
 from gen_model.rigid_utils import Rigid, Rotation
 try:
     from openfold.data import data_transforms
@@ -389,3 +393,49 @@ class MDGenDataset(torch.utils.data.Dataset):
         output['coord_scale'] = torch.tensor(self.coord_scale)
         
         return output
+
+class MDGenDataModule(L.LightningDataModule):
+    def __init__(self, args, diffuser=None, batch_size=32, num_workers=4):
+        super().__init__()
+        self.args = args
+        self.diffuser = diffuser
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.coord_scale = None
+
+    def setup(self, stage=None):
+        if stage == 'fit' or stage is None:
+            self.train_dataset = MDGenDataset(
+                args=self.args,
+                diffuser=self.diffuser,
+                split=self.args.train_split,
+                mode='train'
+            )
+            # Share coord_scale from train dataset
+            self.coord_scale = self.train_dataset.coord_scale
+            
+            self.val_dataset = MDGenDataset(
+                args=self.args,
+                diffuser=self.diffuser,
+                split=self.args.train_split, # Usually would be a val split, but using the same for matching original code
+                mode='val'
+            )
+            self.val_dataset.coord_scale = self.coord_scale
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )
