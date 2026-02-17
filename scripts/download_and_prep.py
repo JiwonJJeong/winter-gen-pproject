@@ -110,7 +110,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download and preprocess ATLAS protein data.")
     parser.add_argument("name", type=str, help="Protein ID (e.g., 1a62_A)")
     parser.add_argument("--data_dir", type=str, default="./data", help="Directory to download raw data to")
-    parser.add_argument("--out_dir", type=str, default="./data", help="Directory to save preprocessed .npy files") # prep_sims default was ./data_atlas, changing to ./data for consistency? checking user pattern
+    parser.add_argument("--out_dir", type=str, default="./data", help="Directory to save preprocessed .npy files")
+    parser.add_argument("--suffix", type=str, default="", help="Suffix for preprocessed .npy files")
     parser.add_argument("--stride", type=int, default=1, help="Stride for preprocessing")
     parser.add_argument("--train_early_ns", type=float, default=5.0, help="Duration of the early training split in nanoseconds")
     parser.add_argument("--ratios", type=float, nargs=3, default=[0.6, 0.2, 0.2], help="Ratios for train, val, test splits after early part")
@@ -157,11 +158,12 @@ if __name__ == "__main__":
     # The actual ps_per_frame in the saved .npy depends on stride
     npy_ps_per_frame = ps_per_frame * args.stride
 
-    preprocess_protein(args.name, args.data_dir, args.out_dir, stride=args.stride, atlas=True, force=args.force_prep)
+    preprocess_protein(args.name, args.data_dir, args.out_dir, suffix=args.suffix, stride=args.stride, atlas=True, force=args.force_prep)
 
     # 3. Create Split
     print(f"Creating 4-way split (Early: {args.train_early_ns}ns, Ratios: {args.ratios})...")
     create_split(args.name, args.out_dir, args.split_output, 
+                 suffix=args.suffix,
                  ps_per_frame=npy_ps_per_frame, 
                  train_early_ns=args.train_early_ns, 
                  ratios=tuple(args.ratios))

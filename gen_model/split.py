@@ -4,14 +4,14 @@ import numpy as np
 import pandas as pd
 import glob
 
-def create_split(protein_name, data_dir, output_csv, ps_per_frame=1.0, train_early_ns=5.0, ratios=(0.6, 0.2, 0.2)):
+def create_split(protein_name, data_dir, output_csv, suffix='', ps_per_frame=1.0, train_early_ns=5.0, ratios=(0.6, 0.2, 0.2)):
     """
     Creates a contiguous 4-way split (train_early, train, val, test) for the given protein.
     """
     # 1. Find trajectory files
     search_patterns = [
-        os.path.join(data_dir, protein_name, f"{protein_name}*.npy"),
-        os.path.join(data_dir, f"{protein_name}*.npy")
+        os.path.join(data_dir, protein_name, f"{protein_name}*{suffix}.npy"),
+        os.path.join(data_dir, f"{protein_name}*{suffix}.npy")
     ]
     
     found_files = []
@@ -93,14 +93,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create a contiguous 4-way split for a protein trajectory.")
     parser.add_argument("name", type=str, help="Protein name (e.g. 1a62_A)")
     parser.add_argument("--train_early_ns", type=float, default=5.0, help="Duration of the early training split in nanoseconds")
-    parser.add_argument("--ps_per_frame", type=float, default=10.0, help="Picoseconds per frame (timestep * stride)")
-    parser.add_argument("--ratios", type=float, nargs=3, default=[0.6, 0.2, 0.2], help="Ratios for train, val, test splits after early part")
-    parser.add_argument("--data_dir", type=str, default="./data", help="Path to data directory containing .npy files")
+    parser.add_argument("--suffix", type=str, default="", help="Suffix for preprocessed .npy files")
     parser.add_argument("--output", type=str, default="gen_model/splits/frame_splits.csv", help="Output CSV file")
     
     args = parser.parse_args()
     
     create_split(args.name, args.data_dir, args.output, 
+                 suffix=args.suffix,
                  ps_per_frame=args.ps_per_frame, 
                  train_early_ns=args.train_early_ns, 
                  ratios=tuple(args.ratios))
