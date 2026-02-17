@@ -63,13 +63,14 @@ class MDGenDataset(torch.utils.data.Dataset):
         
         # Calculate or load coordination scale factor
         self.coord_scale = getattr(args, 'coord_scale', None)
+
         if self.coord_scale is None:
             if self.mode in ['train', 'train_early']:
                 self.coord_scale = self._compute_coord_scale()
             else:
                 # Default for val/test if not provided - should ideally match train
-                self.coord_scale = 0.1 
-        
+                self.coord_scale = 0.1
+
         print(f"Dataset {mode} mode: coord_scale = {self.coord_scale:.4f}")
 
     def _compute_coord_scale(self):
@@ -384,7 +385,9 @@ class MDGenDataModule(L.LightningDataModule):
         self.diffuser = diffuser
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.coord_scale = None
+        # Store coord_scale directly in __dict__ to bypass Lightning's
+        # __setattr__, which routes through OmegaConf and rejects numpy types.
+        self.__dict__['coord_scale'] = None
 
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
@@ -395,22 +398,16 @@ class MDGenDataModule(L.LightningDataModule):
                 split=self.args.train_split,
                 mode='train'
             )
-            self.coord_scale = self.train_dataset.coord_scale
-            
-            # 2. Update args for validation dataset to ensure it uses the shared scale
-            # We use a temporary dictionary or copy if needed, but here simple attribute update on self.args works
-            # because MDGenDataset reads getattr(args, 'coord_scale', None)
-            from omegaconf import OmegaConf
-            val_args = OmegaConf.create(OmegaConf.to_container(self.args))
-            val_args.coord_scale = float(self.coord_scale)
+            self.__dict__['coord_scale'] = float(self.train_dataset.coord_scale)
 
+            # 2. Create validation dataset, then override coord_scale to match train
             self.val_dataset = MDGenDataset(
-                args=val_args,
+                args=self.args,
                 diffuser=self.diffuser,
                 split=self.args.train_split,
                 mode='val'
             )
-            self.val_dataset.coord_scale = float(self.coord_scale) # Redundant but safe
+            self.val_dataset.coord_scale = float(self.__dict__['coord_scale'])
 
     def train_dataloader(self):
         return DataLoader(
