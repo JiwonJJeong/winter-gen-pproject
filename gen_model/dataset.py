@@ -61,15 +61,15 @@ class MDGenDataset(torch.utils.data.Dataset):
         self.balanced_weights = {}
         self._build_frame_index()
         
-        # Calculate or load coordination scale factor
-        self.coord_scale = getattr(args, 'coord_scale', None)
-
-        if self.coord_scale is None:
+        # Calculate or load coordination scale factor.
+        # Use __dict__ to bypass any custom __setattr__ that routes through OmegaConf.
+        coord_scale = getattr(args, 'coord_scale', None)
+        if coord_scale is None:
             if self.mode in ['train', 'train_early']:
-                self.coord_scale = self._compute_coord_scale()
+                coord_scale = self._compute_coord_scale()
             else:
-                # Default for val/test if not provided - should ideally match train
-                self.coord_scale = 0.1
+                coord_scale = 0.1
+        self.__dict__['coord_scale'] = float(coord_scale)
 
         print(f"Dataset {mode} mode: coord_scale = {self.coord_scale:.4f}")
 
@@ -385,29 +385,31 @@ class MDGenDataModule(L.LightningDataModule):
         self.diffuser = diffuser
         self.batch_size = batch_size
         self.num_workers = num_workers
-        # Store coord_scale directly in __dict__ to bypass Lightning's
-        # __setattr__, which routes through OmegaConf and rejects numpy types.
+        # Use __dict__ to bypass Lightning's __setattr__ which routes
+        # through OmegaConf and rejects numpy types like float32.
         self.__dict__['coord_scale'] = None
 
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
             # 1. Initialize training dataset to compute scale if needed
-            self.train_dataset = MDGenDataset(
+            train_ds = MDGenDataset(
                 args=self.args,
                 diffuser=self.diffuser,
                 split=self.args.train_split,
                 mode='train'
             )
-            self.__dict__['coord_scale'] = float(self.train_dataset.coord_scale)
+            self.__dict__['coord_scale'] = float(train_ds.coord_scale)
+            self.__dict__['train_dataset'] = train_ds
 
             # 2. Create validation dataset, then override coord_scale to match train
-            self.val_dataset = MDGenDataset(
+            val_ds = MDGenDataset(
                 args=self.args,
                 diffuser=self.diffuser,
                 split=self.args.train_split,
                 mode='val'
             )
-            self.val_dataset.coord_scale = float(self.__dict__['coord_scale'])
+            val_ds.__dict__['coord_scale'] = float(self.__dict__['coord_scale'])
+            self.__dict__['val_dataset'] = val_ds
 
     def train_dataloader(self):
         return DataLoader(
