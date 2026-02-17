@@ -216,42 +216,25 @@ class MDGenDataset(torch.utils.data.Dataset):
         return w.numpy()
     
     def __len__(self):
-        if getattr(self.args, 'overfit_peptide', None): return 1000
         return len(self.frame_index)
 
     def __getitem__(self, idx):
         # 1. Resolve Protein and Starting Frame
-        if getattr(self.args, 'overfit_peptide', None):
-            name = self.args.overfit_peptide
-            full_name = name 
-            folder_name = name.split('_R')[0]
-            
-            # Sequence lookup for overfit
+        protein_idx, frame_start = self.frame_index[idx]
+        name = self.df.index[protein_idx]
+        full_name = name 
+        folder_name = name.split('_R')[0]
+        
+        # Sequence lookup from atlas_csv mapping
+        try:
             seqres = self.seq_map[folder_name]
-            
-            npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
-            arr = np.lib.format.open_memmap(npy_path, 'r')
-            if self.args.frame_interval: 
-                arr = arr[::self.args.frame_interval]
-            
-            required_span = (self.num_consecutive - 1) * self.stride + 1
-            frame_start = np.random.choice(np.arange(arr.shape[0] - required_span + 1))
-        else:
-            protein_idx, frame_start = self.frame_index[idx]
-            name = self.df.index[protein_idx]
-            full_name = name 
-            folder_name = name.split('_R')[0]
-            
-            # Sequence lookup from atlas_csv mapping
-            try:
-                seqres = self.seq_map[folder_name]
-            except KeyError:
-                raise KeyError(f"Protein {folder_name} not found in sequence mapping!")
+        except KeyError:
+            raise KeyError(f"Protein {folder_name} not found in sequence mapping!")
 
-            npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
-            arr = np.lib.format.open_memmap(npy_path, 'r')
-            if self.args.frame_interval: 
-                arr = arr[::self.args.frame_interval]
+        npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
+        arr = np.lib.format.open_memmap(npy_path, 'r')
+        if self.args.frame_interval: 
+            arr = arr[::self.args.frame_interval]
 
         # 2. Extract Strided Frames (use first frame for single-frame training)
         indices = [frame_start + i * self.stride for i in range(self.num_consecutive)]
@@ -405,22 +388,29 @@ class MDGenDataModule(L.LightningDataModule):
 
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
+            # 1. Initialize training dataset to compute scale if needed
             self.train_dataset = MDGenDataset(
                 args=self.args,
                 diffuser=self.diffuser,
                 split=self.args.train_split,
                 mode='train'
             )
-            # Share coord_scale from train dataset
             self.coord_scale = self.train_dataset.coord_scale
             
+            # 2. Update args for validation dataset to ensure it uses the shared scale
+            # We use a temporary dictionary or copy if needed, but here simple attribute update on self.args works
+            # because MDGenDataset reads getattr(args, 'coord_scale', None)
+            from omegaconf import OmegaConf
+            val_args = OmegaConf.create(OmegaConf.to_container(self.args))
+            val_args.coord_scale = self.coord_scale
+
             self.val_dataset = MDGenDataset(
-                args=self.args,
+                args=val_args,
                 diffuser=self.diffuser,
-                split=self.args.train_split, # Usually would be a val split, but using the same for matching original code
+                split=self.args.train_split,
                 mode='val'
             )
-            self.val_dataset.coord_scale = self.coord_scale
+            self.val_dataset.coord_scale = self.coord_scale # Redundant but safe
 
     def train_dataloader(self):
         return DataLoader(

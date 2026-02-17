@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 
 
 # Base classes from original code
-class SimpleDDPM:
+class SimpleDDPM(nn.Module):
     """Basic DDPM implementation for frame denoising."""
 
     def __init__(self, timesteps=1000, beta_start=0.0001, beta_end=0.02):
@@ -34,24 +34,30 @@ class SimpleDDPM:
             beta_start: Starting beta value (small noise)
             beta_end: Ending beta value (large noise)
         """
+        super().__init__()
         self.timesteps = timesteps
 
         # Linear noise schedule
-        self.betas = torch.linspace(beta_start, beta_end, timesteps)
-        self.alphas = 1.0 - self.betas
-        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
-        self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
+        betas = torch.linspace(beta_start, beta_end, timesteps)
+        alphas = 1.0 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
 
-        # Precompute values for forward and reverse diffusion
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
-        self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas)
-        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / self.alphas_cumprod - 1)
-
+        # Register as buffers to handle device placement automatically
+        self.register_buffer('betas', betas)
+        self.register_buffer('alphas', alphas)
+        self.register_buffer('alphas_cumprod', alphas_cumprod)
+        self.register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
+        self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1.0 - alphas_cumprod))
+        self.register_buffer('sqrt_recip_alphas', torch.sqrt(1.0 / alphas))
+        self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1.0 / alphas_cumprod - 1))
+        
         # Posterior variance for reverse process
-        self.posterior_variance = (
-            self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        posterior_variance = (
+            betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         )
+        self.register_buffer('posterior_variance', posterior_variance)
 
     def add_noise(self, x_0, t, noise=None):
         """Forward diffusion: add noise to data.
@@ -76,19 +82,6 @@ class SimpleDDPM:
             sqrt_one_minus_alphas_cumprod_t = sqrt_one_minus_alphas_cumprod_t[..., None]
 
         return sqrt_alphas_cumprod_t * x_0 + sqrt_one_minus_alphas_cumprod_t * noise
-
-    def to(self, device):
-        """Move all tensors to device."""
-        self.betas = self.betas.to(device)
-        self.alphas = self.alphas.to(device)
-        self.alphas_cumprod = self.alphas_cumprod.to(device)
-        self.alphas_cumprod_prev = self.alphas_cumprod_prev.to(device)
-        self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(device)
-        self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(device)
-        self.sqrt_recip_alphas = self.sqrt_recip_alphas.to(device)
-        self.sqrt_recipm1_alphas_cumprod = self.sqrt_recipm1_alphas_cumprod.to(device)
-        self.posterior_variance = self.posterior_variance.to(device)
-        return self
 
 
 class SimpleDenoiseModel(nn.Module):
@@ -261,6 +254,44 @@ class DDPMModule(L.LightningModule):
             loss = F.mse_loss(noise, pred_noise)
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        if 'atom14_pos' in batch:
+            x_0 = batch['atom14_pos']
+        elif 'rigids_0' in batch:
+            x_0 = batch['rigids_0'][..., 4:]
+        else:
+            return None
+
+        # Flatten if needed
+        if len(x_0.shape) == 4:
+            x_0 = x_0.reshape(x_0.shape[0], x_0.shape[1], -1)
+
+        batch_size, n_residues, channels = x_0.shape
+
+        # Sample noise and timesteps
+        t = torch.randint(0, self.diffusion.timesteps, (batch_size,), device=self.device).long()
+        noise = torch.randn_like(x_0)
+
+        # Add noise
+        x_t = self.diffusion.add_noise(x_0, t, noise)
+
+        # Predict noise
+        pred_noise = self.model(x_t, t)
+
+        # Compute loss (handle masking if present)
+        if 'res_mask' in batch or 'mask' in batch:
+            mask = batch.get('res_mask', batch.get('mask'))
+            mask_expanded = mask.unsqueeze(-1)
+            loss_per_element = F.mse_loss(pred_noise, noise, reduction='none')
+            masked_loss = loss_per_element * mask_expanded
+            num_visible = mask.sum() * channels + 1e-8
+            loss = masked_loss.sum() / num_visible
+        else:
+            loss = F.mse_loss(noise, pred_noise)
+        
+        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
