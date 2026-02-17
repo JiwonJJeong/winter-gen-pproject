@@ -141,19 +141,22 @@ def load_checkpoint(checkpoint_path, model, device='cuda'):
     Returns:
         Loaded model, epoch number, loss
     """
+    model = model.to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['model_state_dict'])    
     epoch = checkpoint['epoch']
     loss = checkpoint.get('loss', None)
+    coord_scale = checkpoint.get('coord_scale', 0.1)
 
     print(f'Loaded checkpoint from epoch {epoch}')
     if loss is not None:
         print(f'Checkpoint loss: {loss:.6f}')
+    print(f'Loaded coord_scale: {coord_scale:.4f}')
 
-    return model, epoch, loss
+    return model, epoch, loss, coord_scale
 
 
-def test_with_dataset(model, diffusion, dataset, device='cuda', num_samples=5):
+def test_with_dataset(model, diffusion, dataset, device='cuda', coord_scale=0.1, num_samples=5):
     """Test model by noising and denoising frames from dataset.
 
     Args:
@@ -161,6 +164,7 @@ def test_with_dataset(model, diffusion, dataset, device='cuda', num_samples=5):
         diffusion: SimpleDDPM instance
         dataset: Dataset instance
         device: Device to run on
+        coord_scale: Scaling factor for unscaling
         num_samples: Number of samples to test
 
     Returns:
@@ -186,8 +190,8 @@ def test_with_dataset(model, diffusion, dataset, device='cuda', num_samples=5):
 
         x_0 = x_0.unsqueeze(0).to(device)
 
-        # Add noise at a specific timestep (e.g., t=500)
-        t = torch.tensor([500], device=device)
+        # Add noise at a specific timestep (e.g., middle of schedule)
+        t = torch.tensor([diffusion.timesteps // 2], device=device)
         noise = torch.randn_like(x_0)
         x_noisy = diffusion.add_noise(x_0, t, noise)
 
@@ -195,19 +199,23 @@ def test_with_dataset(model, diffusion, dataset, device='cuda', num_samples=5):
         x_denoised = denoise_frame(model, diffusion, x_noisy, device=device)
 
         # Convert to numpy
-        x_0_np = x_0.cpu().numpy()
-        x_noisy_np = x_noisy.cpu().numpy()
-        x_denoised_np = x_denoised.cpu().numpy()
+        # Move predictions to CPU and unscale
+        # x_0 and x_pred are scaled. Reverse transform for MSE and saving.
+        # Centroid is restored for full reconstruction if needed.
+        centroid = sample['centroid'].unsqueeze(0).to(device) # [1, 3]
 
-        # Compute reconstruction error
-        mse = np.mean((x_0_np - x_denoised_np) ** 2)
-        print(f'Sample {i+1}: MSE = {mse:.6f}')
+        x_0_unscaled = (x_0.squeeze(0).cpu() / coord_scale) + centroid.cpu()
+        x_pred_unscaled = (x_denoised.squeeze(0).cpu() / coord_scale) + centroid.cpu()
+        x_noisy_unscaled = (x_noisy.squeeze(0).cpu() / coord_scale) + centroid.cpu()
+
+        mse = torch.mean((x_0_unscaled - x_pred_unscaled)**2)
+        print(f'Sample {i+1}: reconstruction MSE = {mse.item():.6f} (Angstroms^2)')
 
         results.append({
-            'original': x_0_np,
-            'noisy': x_noisy_np,
-            'denoised': x_denoised_np,
-            'mse': mse
+            'original': x_0_unscaled.numpy(),
+            'noisy': x_noisy_unscaled.numpy(),
+            'denoised': x_pred_unscaled.numpy(),
+            'mse': mse.item()
         })
 
     return results
@@ -253,6 +261,7 @@ def main():
         num_consecutive=1,
         stride=1
     )
+    args.dataset = dataset # Attach dataset to args for test_with_dataset
 
     # Get sample to determine dimensions
     sample = dataset[0]
@@ -272,14 +281,14 @@ def main():
 
     # Create model and diffusion
     # Use total flattened dimension: in_channels + time_emb_dim
-    model = SimpleDenoiseModel(in_channels=in_channels, hidden_dim=256, time_emb_dim=128)
-    diffusion = SimpleDDPM(timesteps=1000, beta_start=0.0001, beta_end=0.02)
-    diffusion = diffusion.to(device)
-
-    # Load checkpoint
-    model, epoch, loss = load_checkpoint(args.checkpoint, model, device)
-    model = model.to(device)
-
+    # model = SimpleDenoiseModel(in_channels=in_channels, hidden_dim=256, time_emb_dim=128) # Original line
+    # diffusion = SimpleDDPM(timesteps=1000, beta_start=0.0001, beta_end=0.02) # Original line
+    # Load model architecture and checkpoint
+    model = SimpleDenoiseModel(in_channels=in_channels, hidden_dim=256, time_emb_dim=128) # Re-added hidden_dim and time_emb_dim
+    diffusion = SimpleDDPM(timesteps=1000, beta_start=0.0001, beta_end=0.02) # Re-added diffusion init
+    model, epoch, loss, coord_scale = load_checkpoint(args.checkpoint, model, device=device)
+    model.eval()
+    
     # Run inference based on mode
     if args.mode == 'sample':
         print('Sampling from random noise...')
@@ -293,7 +302,7 @@ def main():
 
     elif args.mode == 'test':
         print(f'Testing on {args.num_samples} samples from dataset...')
-        results = test_with_dataset(model, diffusion, dataset, device, args.num_samples)
+        results = test_with_dataset(model, diffusion, dataset, device, coord_scale, args.num_samples)
 
         # Save results
         for i, result in enumerate(results):

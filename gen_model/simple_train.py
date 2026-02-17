@@ -317,12 +317,14 @@ def train_ddpm(
         # Save checkpoint
         if (epoch + 1) % save_every == 0:
             checkpoint_path = os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pt')
-            torch.save({
+            checkpoint = {
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_loss,
-            }, checkpoint_path)
+                'coord_scale': dataset.coord_scale
+            }
+            torch.save(checkpoint, checkpoint_path)
             print(f'Saved checkpoint: {checkpoint_path}')
 
 

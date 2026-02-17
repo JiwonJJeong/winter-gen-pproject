@@ -56,7 +56,52 @@ class MDGenDataset(torch.utils.data.Dataset):
         
         self.balanced_weights = {}
         self._build_frame_index()
-    
+        
+        # Calculate or load coordination scale factor
+        self.coord_scale = getattr(args, 'coord_scale', None)
+        if self.coord_scale is None:
+            if self.mode in ['train', 'train_early']:
+                self.coord_scale = self._compute_coord_scale()
+            else:
+                # Default for val/test if not provided - should ideally match train
+                self.coord_scale = 0.1 
+        
+        print(f"Dataset {mode} mode: coord_scale = {self.coord_scale:.4f}")
+
+    def _compute_coord_scale(self):
+        """Computes global scale factor from sampled training data."""
+        print(f"Computing coordinate scale for {len(self.frame_index)} frames...")
+        ca_coords = []
+        
+        # Sample frames to estimate statistics accurately but efficiently
+        num_samples = min(500, len(self.frame_index))
+        indices = np.random.choice(len(self.frame_index), num_samples, replace=False)
+        
+        for idx in indices:
+            protein_idx, frame_start = self.frame_index[idx]
+            name = self.df.index[protein_idx]
+            folder_name = name.split('_R')[0]
+            npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
+            
+            arr = np.lib.format.open_memmap(npy_path, 'r')
+            if self.args.frame_interval:
+                # Simplified sampling logic for scale computation
+                frame_data = arr[frame_start * self.args.frame_interval]
+            else:
+                frame_data = arr[frame_start]
+            
+            # Extract CA (index 1) and center it
+            ca = frame_data[:, 1, :].astype(np.float32)
+            ca = ca - np.mean(ca, axis=0, keepdims=True)
+            ca_coords.append(ca)
+        
+        if not ca_coords:
+            return 0.1
+            
+        all_ca = np.concatenate(ca_coords, axis=0) # [N_sampled * L, 3]
+        std = np.std(all_ca)
+        return 1.0 / (std + 1e-8)
+
     def _build_frame_index(self):
         self.frame_index = []
         # Total span of frames we need to extract per sample
@@ -323,5 +368,24 @@ class MDGenDataset(torch.utils.data.Dataset):
             'name': full_name,
             'frame_indices': np.array(indices),
         }
+        
+        # 9. Apply Centering and Scaling to translations
+        # Use CA atoms (index 1 in atom14) as the reference for centering
+        ca_pos = output['atom14_pos'][:, 1, :] # [L, 3]
+        centroid = torch.mean(ca_pos, dim=0, keepdim=True) # [1, 3]
+        
+        # Center and scale atom14
+        output['atom14_pos'] = (output['atom14_pos'] - centroid.unsqueeze(0)) * self.coord_scale
+        
+        # Center and scale atom37
+        output['atom37_pos'] = (output['atom37_pos'] - centroid.unsqueeze(0)) * self.coord_scale
+        
+        # Center and scale rigids translation
+        # rigids_0 is [7] tensor (quaternion [4] + translation [3])
+        output['rigids_0'][..., 4:] = (output['rigids_0'][..., 4:] - centroid) * self.coord_scale
+        
+        # Store normalization metadata
+        output['centroid'] = centroid
+        output['coord_scale'] = torch.tensor(self.coord_scale)
         
         return output
