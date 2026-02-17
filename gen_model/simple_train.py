@@ -197,6 +197,9 @@ class SimpleDenoiseModel(nn.Module):
 class DDPMModule(L.LightningModule):
     def __init__(self, in_channels, lr=1e-4, timesteps=1000, coord_scale=0.1):
         super().__init__()
+        # Ensure coord_scale is a standard float to avoid OmegaConf serialization issues with float32
+        if coord_scale is not None:
+            coord_scale = float(coord_scale)
         self.save_hyperparameters()
         self.model = SimpleDenoiseModel(in_channels=in_channels)
         self.diffusion = SimpleDDPM(timesteps=timesteps)
