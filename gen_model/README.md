@@ -1,107 +1,116 @@
-# Gen Model - Simplified DDPM for Protein Frame Denoising
+# Generative Model for Protein MD Trajectories
 
-This directory contains a simplified implementation of DDPM (Denoising Diffusion Probabilistic Models) for training and inference on single protein frames from MD trajectories.
-
-## Overview
-
-The goal is to train a model that:
-1. Takes a single protein frame
-2. Adds noise to it following a diffusion schedule
-3. Learns to denoise it back to the original frame
-
-This is a basic DDPM implementation that serves as a foundation for more complex protein generation tasks.
+This directory contains code for training and running inference with diffusion models on molecular dynamics (MD) trajectories.
 
 ## Directory Structure
 
 ```
 gen_model/
-├── train.py              -> symlink to simple_train.py (main training script)
-├── inference.py          -> symlink to simple_inference.py (main inference script)
-├── simple_train.py       # Standalone DDPM training implementation
-├── simple_inference.py   # Standalone DDPM inference implementation
-├── dataset.py            # MDGenDataset for loading MD trajectory data
-├── models/               # Neural network models
-│   ├── score_network.py  # SE3 score network (for advanced SE3 diffusion)
-│   ├── ipa_pytorch.py    # Invariant Point Attention module
-│   ├── layers.py         # Network layers
-│   ├── nextnet.py        # NextNet backbone (ConvNext-based)
-│   └── unet.py           # U-Net backbone
-├── diffusion/            # Diffusion implementations
-│   ├── diffusion.py      # Basic DDPM (used by main.py - image/video)
-│   ├── conditional_diffusion.py  # Conditional DDPM
-│   ├── se3_diffuser.py   # SE3 diffusion for protein structure
-│   └── ...               # Other diffusion utilities
-├── geometry.py           # Geometric transformations
-├── residue_constants.py  # Protein residue definitions
-├── rigid_utils.py        # Rigid body transformations
-└── splits/               # Train/val/test split definitions
+├── simple_train.py          # Basic DDPM training script
+├── simple_inference.py      # Basic DDPM inference script
+├── dataset.py               # MD trajectory data loader
+├── models/                  # Neural network architectures
+│   ├── score_network.py     # SE3 diffusion score network
+│   ├── ipa_pytorch.py       # Invariant Point Attention
+│   ├── nextnet.py           # NextNet backbone
+│   └── layers.py            # Utility layers
+├── diffusion/              # Diffusion implementations
+│   ├── se3_diffuser.py     # SE3 diffusion (future use)
+│   ├── so3_diffuser.py     # SO(3) rotation diffusion
+│   ├── r3_diffuser.py      # R³ translation diffusion
+│   └── igso3.py            # IGSO3 distribution
+├── splits/                 # Train/val/test splits
+└── utils/                  # Utility functions
 ```
 
 ## Quick Start
 
 ### Training
 
-Train a basic DDPM model on single frames:
-
 ```bash
-python gen_model/train.py
+python gen_model/simple_train.py
 ```
-
-This will:
-- Load MD trajectory data from `data/` directory
-- Train a denoising model to recover original frames from noised versions
-- Save checkpoints to `checkpoints/simple_ddpm/`
 
 ### Inference
 
-After training, run inference to test denoising:
-
 ```bash
-# Test on dataset samples
-python gen_model/inference.py --checkpoint checkpoints/simple_ddpm/checkpoint_epoch_100.pt --mode test --num_samples 5
+# Test on dataset
+python gen_model/simple_inference.py \
+  --checkpoint checkpoints/simple_ddpm/checkpoint_epoch_100.pt \
+  --mode test \
+  --num_samples 5
 
-# Generate new samples from noise
-python gen_model/inference.py --checkpoint checkpoints/simple_ddpm/checkpoint_epoch_100.pt --mode sample
+# Generate from noise
+python gen_model/simple_inference.py \
+  --checkpoint checkpoints/simple_ddpm/checkpoint_epoch_100.pt \
+  --mode sample
 ```
 
-## Implementation Details
+---
 
-### SimpleDDPM Class
+## Dataset (MDGenDataset)
 
-The `SimpleDDPM` class in `simple_train.py` implements:
-- **Forward diffusion**: Gradually adds Gaussian noise to data
-- **Noise schedule**: Linear schedule from β_start to β_end
-- **Timesteps**: 1000 steps by default
+The `dataset.py` module provides `MDGenDataset` for loading MD trajectory data.
 
-### SimpleDenoiseModel
+### Key Features
 
-A simple MLP-based architecture that:
-- Takes noisy frame and timestep as input
-- Embeds the timestep
-- Processes through encoder-decoder with skip connections
-- Outputs predicted noise (epsilon-prediction)
+**SE(3) Invariance**: Every frame is aligned to frame 0 via global superposition using heavy atoms (non-hydrogen protein atoms) to ensure a consistent coordinate system across the trajectory.
 
-### Training Process
+**4-Way Split Logic**: Data is partitioned chronologically into:
+- `train_early`: Frames [0 to main training end], includes early and main data
+- `train`: Main training frames after the early threshold
+- `val`: Validation frames
+- `test`: Test frames
 
-1. Load frame from dataset
-2. Sample random timestep t
-3. Add noise according to diffusion schedule
-4. Model predicts the noise
-5. Compute MSE loss between predicted and actual noise
-6. Update model parameters
+Default early threshold: 5ns. Default mode: 'train'.
 
-### Inference Process
+**Spatial Masking**: Supports generative tasks by removing edge residues similar to image cropping. Only applied in 'train'/'train_early' when `crop_ratio` < 1.0.
+- Goal: Uniform visibility probability (k/L) for all residues, removing core bias
+- Mechanism: Iterative Proportional Fitting (IPF) computes balanced seed weights
+- Reference Frame: Frame 0 (train_early) or First Train Frame (train)
+- Selection: Weighted seed sampling → N nearest CA-CA neighbors kept
+- Output: mask [L] tensor (1.0 = visible, 0.0 = masked)
 
-1. Start from random noise (or noisy frame)
-2. Iteratively denoise for T timesteps
-3. At each step, predict noise and compute less noisy version
-4. Return final denoised frame
+### Dataset Output Format
 
-## Configuration
-
-Edit the configuration in `simple_train.py`:
+Each item (after default collation) contains:
+- **F**: Number of consecutive frames (defined by num_consecutive)
+- **L**: Sequence length (number of residues)
+- **B**: Batch size
 
 ```python
+{
+    'name': [1],                    # List of protein identifiers (deduplicated)
+    'frame_indices': [B, F],        # Indices used
+    'seqres': [1, L],               # Sequence indices (deduplicated)
+    'mask': [B, L],                 # Spatial mask (0/1)
+    'torsion_mask': [1, L, 7],      # Chemical validity (deduplicated)
+    'clean_trans': [B, F, L, 3],    # CA positions
+    'clean_rots': [B, F, L, 3, 3],  # Rotation matrices
+    'clean_torsions': [B, F, L, 7, 2],  # Torsion sin/cos
+    'clean_atom37': [B, F, L, 37, 3],   # All atom coordinates
+}
+```
+
+### Filtering
+
+To avoid batching errors, always filter to a single protein:
+- `--pep_name`: Filter by protein (e.g., "4o66_C"). Default: None
+- `--replica`: Filter by replica (e.g., "1" for _R1). Default: 1
+- `--crop_ratio`: Fraction of residues to keep (0.0-1.0). Default: 0.95
+
+### Sampling
+
+- `num_consecutive`: Frames per sample. Changes tensor shape (F dimension). Default: 1
+- `stride`: Gap between consecutive frames in a sample. Default: 1
+- `repeat`: Oversampling factor. Changes epoch size, not data shape. Default: 1
+
+### Basic Usage
+
+```python
+from gen_model.dataset import MDGenDataset
+from omegaconf import OmegaConf
+
 args = OmegaConf.create({
     'data_dir': 'data',
     'atlas_csv': 'data/atlas.csv',
@@ -111,37 +120,95 @@ args = OmegaConf.create({
     'crop_ratio': 0.95,
     'min_t': 0.01,
 })
+
+dataset = MDGenDataset(
+    args=args,
+    diffuser=None,  # No SE3 diffuser needed for basic DDPM
+    split=args.train_split,
+    mode='train',
+    repeat=1,
+    num_consecutive=1,
+    stride=1
+)
+
+# Ensure args.pep_name is set for batching
+sample = dataset[0]
 ```
 
-## Data Format
+---
 
-The MDGenDataset expects:
-- MD trajectory data as `.npy` files in `data/` directory
-- Atlas CSV mapping protein names to sequences
-- Split CSV defining train/val/test splits
+## DDPM Implementation
 
-Each frame should contain atomic coordinates for all residues.
+### SimpleDDPM
 
-## Removed/Archived Files
+Basic DDPM implementation for frame denoising. Features:
+- Linear noise schedule with β values
+- Forward diffusion: x_t = √(ᾱ_t)·x_0 + √(1-ᾱ_t)·ε
+- Reverse diffusion (denoising)
+- ε-prediction (noise prediction objective)
 
-For simplification, the following have been removed or archived:
-- `experiments/` - Complex SE3 diffusion training (protein-specific, SE3 equivariant)
-- `model/` - Duplicate of `gen_model/models/`
-- `main.py` - Image/video DDPM (not needed for protein frames)
-- `train_se3.py.bak` - Original SE3 training script (archived)
-- `inference_se3.py.bak` - Original SE3 inference script (archived)
+### SimpleDenoiseModel
 
-If you need SE3 equivariant diffusion for full protein structure generation, refer to the `.bak` files.
+Simple U-Net-like model for denoising frames:
+- MLP encoder-decoder with skip connections
+- Time embedding via sinusoidal encoding
+- Input: noisy frame + timestep
+- Output: predicted noise
 
-## Next Steps
+### Training Process
 
-This basic DDPM serves as a starting point. Potential enhancements:
-1. **SE3 Equivariance**: Use `se3_diffuser.py` for rotation/translation equivariance
-2. **Conditional Generation**: Condition on sequence, structure, or other features
-3. **Improved Architecture**: Use attention mechanisms or graph neural networks
-4. **Multi-frame Generation**: Extend to generate trajectories (multiple consecutive frames)
+1. Load single frame from MD trajectory
+2. Sample random timestep t ∈ [0, 1000]
+3. Add Gaussian noise: x_t = √(ᾱ_t)·x_0 + √(1-ᾱ_t)·ε
+4. Model predicts noise: ε_pred = model(x_t, t)
+5. Loss: MSE(ε_pred, ε)
+6. Save checkpoints every 10 epochs
 
-## References
+### Inference Process
 
-- DDPM: [Denoising Diffusion Probabilistic Models](https://arxiv.org/abs/2006.11239)
-- SE(3) Diffusion: [SE(3) Diffusion for Protein Generation](https://arxiv.org/abs/2302.02277)
+1. Start from noise (or noisy frame)
+2. Reverse diffusion: x_{t-1} = denoise_step(x_t, t)
+3. Iterate for all timesteps
+4. Return denoised frame
+
+---
+
+## Hyperparameters
+
+See [HYPERPARAMETER_GUIDE.md](../HYPERPARAMETER_GUIDE.md) for detailed tuning guide.
+
+**Quick Reference:**
+- `timesteps`: 100-1000 (diffusion steps)
+- `hidden_dim`: 128-512 (model capacity)
+- `batch_size`: 4-16 (GPU memory dependent)
+- `num_epochs`: 50-200 (training duration)
+- `learning_rate`: 1e-5 to 5e-4
+- `beta_start`: 0.0001 (initial noise)
+- `beta_end`: 0.02 (final noise)
+
+---
+
+## Google Colab
+
+See [NOTEBOOK_USAGE.md](../NOTEBOOK_USAGE.md) for complete Colab workflow.
+
+Quick start:
+1. Push code to GitHub
+2. Open `colab_single_protein_ddpm.ipynb` in Colab
+3. Update `REPO_URL` in Step 2
+4. Configure protein in Step 3
+5. Run all cells
+
+---
+
+## Advanced: SE3 Diffusion (Future)
+
+The `diffusion/` directory contains SE3 diffusion implementations for future use:
+- `se3_diffuser.py`: Combined rotation + translation diffusion
+- `so3_diffuser.py`: Rotation diffusion on SO(3)
+- `r3_diffuser.py`: Translation diffusion on R³
+- `igso3.py`: IGSO(3) distribution computations
+
+The `models/` directory contains advanced architectures:
+- `score_network.py`: SE3 score prediction network
+- `ipa_pytorch.py`: Invariant Point Attention
