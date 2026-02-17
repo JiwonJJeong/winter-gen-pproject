@@ -64,6 +64,9 @@ class MDGenDataset(torch.utils.data.Dataset):
         # Calculate or load coordination scale factor.
         # Use __dict__ to bypass any custom __setattr__ that routes through OmegaConf.
         coord_scale = getattr(args, 'coord_scale', None)
+        if coord_scale is not None:
+             coord_scale = float(coord_scale) # Final cast on creation to avoid OmegaConf float32 issues
+             
         if coord_scale is None:
             if self.mode in ['train', 'train_early']:
                 coord_scale = self._compute_coord_scale()
