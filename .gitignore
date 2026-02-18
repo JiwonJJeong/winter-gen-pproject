@@ -1,2 +1,5 @@
 data/
 env/
+
+__pycache__/
+gen_model/__pycache__/

@@ -1,11 +1,12 @@
 # Adapted from https://github.com/jasonkyuyim/se3_diffusion/
 """Utilities for calculating all atom representations."""
 import torch
-from data import residue_constants
-from openfold.utils import rigid_utils as ru
-from openfold.data import data_transforms
-from openfold.utils import feats
-
+from gen_model import residue_constants
+from gen_model import rigid_utils as ru
+try:
+    from openfold.data import data_transforms
+except ImportError:
+    data_transforms = None
 
 Rigid = ru.Rigid
 Rotation = ru.Rotation
@@ -157,11 +158,11 @@ def compute_backbone(bb_rigids, psi_torsions):
     ).to(bb_rigids.device)
     aatype = torch.zeros(bb_rigids.shape).long()
     # aatype = torch.zeros(bb_rigids.shape).long().to(bb_rigids.device)
-    all_frames = feats.torsion_angles_to_frames(
+    all_frames = torsion_angles_to_frames(
         bb_rigids,
         torsion_angles,
         aatype,
-        DEFAULT_FRAMES.to(bb_rigids.device))
+    )
     atom14_pos = frames_to_atom14_pos(
         all_frames,
         aatype)
