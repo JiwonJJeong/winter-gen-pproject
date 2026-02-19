@@ -390,3 +390,98 @@ class MDGenDataset(torch.utils.data.Dataset):
         
         return output
 
+
+
+class ConditionalMDGenDataset(MDGenDataset):
+    """Conditional SE(3) diffusion dataset.
+
+    Each sample pairs a clean SOURCE frame (index 0 in the trajectory window)
+    with a noised TARGET frame (index num_consecutive-1, i.e. k MD steps ahead).
+
+    The model is conditioned on the source via sc_ca_t (CA positions of the clean
+    source frame, already centred and scaled).  All diffusion fields (rigids_t,
+    rot_score, trans_score, etc.) and torsion_angles_sin_cos refer to the TARGET
+    frame so the loss trains the model to recover the future conformation.
+
+    Requires num_consecutive >= 2.  With num_consecutive=2 and stride=1 the target
+    is 1 MD step ahead; with stride=s it is s steps ahead.
+    """
+
+    def __init__(self, *args, **kwargs):
+        num_consec = kwargs.get('num_consecutive', args[5] if len(args) > 5 else 1)
+        if num_consec < 2:
+            raise ValueError(
+                "ConditionalMDGenDataset requires num_consecutive >= 2 "
+                "(need at least one source frame and one target frame)."
+            )
+        super().__init__(*args, **kwargs)
+
+    def __getitem__(self, idx):
+        # 1. Get source-frame batch from parent (frame_idx=0).
+        #    output['atom14_pos'] and output['centroid'] are already centred+scaled.
+        output = super().__getitem__(idx)
+
+        # 2. Re-read raw frames to access the target frame geometry.
+        #    Memmap re-read is O(1) due to OS page caching.
+        protein_idx, frame_start = self.frame_index[idx]
+        name = self.df.index[protein_idx]
+        folder_name = name.split('_R')[0]
+        seqres = self.seq_map[folder_name]
+
+        npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
+        arr = np.lib.format.open_memmap(npy_path, 'r')
+        if self.args.frame_interval:
+            arr = arr[::self.args.frame_interval]
+
+        target_frame_idx = self.num_consecutive - 1
+        indices = [frame_start + i * self.stride for i in range(self.num_consecutive)]
+        clean_frames = np.copy(arr[indices]).astype(np.float32)
+
+        # 3. Compute geometry for all frames (same pipeline as parent).
+        aatype_np = np.array([restype_order[c] for c in seqres])
+        aatype = torch.from_numpy(aatype_np)[None].expand(self.num_consecutive, -1)
+        frames = atom14_to_frames(torch.from_numpy(clean_frames))
+        atom37 = torch.from_numpy(atom14_to_atom37(clean_frames, aatype)).float()
+        torsions, _ = atom37_to_torsions(atom37, aatype)
+
+        # 4. Build clean target Rigid.
+        target_rigids = Rigid(
+            rots=Rotation(rot_mats=frames._rots._rot_mats[target_frame_idx]),
+            trans=frames._trans[target_frame_idx],
+        )
+
+        # 5. Apply SE(3) diffusion to the TARGET frame using the same t and mask
+        #    that the parent sampled for the source frame.
+        mask_np = output['res_mask'].numpy()
+        t = float(output['t'])
+        if self._diffuser is not None:
+            diff_feats = self._diffuser.forward_marginal(
+                rigids_0=target_rigids, t=t, diffuse_mask=mask_np)
+        else:
+            diff_feats = {
+                'rigids_t':            target_rigids.to_tensor_7(),
+                'rot_score':           torch.zeros_like(output['rot_score']),
+                'trans_score':         torch.zeros_like(output['trans_score']),
+                'rot_score_scaling':   torch.tensor(1.0),
+                'trans_score_scaling': torch.tensor(1.0),
+            }
+
+        # 6. Centre and scale target translations with the SOURCE centroid so
+        #    both frames share the same coordinate origin.
+        centroid = output['centroid']  # [1, 3], computed from source CA
+        diff_feats['rigids_t'][..., 4:] = (
+            diff_feats['rigids_t'][..., 4:] - centroid) * self.coord_scale
+
+        target_r0 = target_rigids.to_tensor_7()
+        target_r0[..., 4:] = (target_r0[..., 4:] - centroid) * self.coord_scale
+
+        # 7. Patch the output dict.
+        #    sc_ca_t: source CA positions (already centred+scaled by parent).
+        #    All diffusion fields and torsions now refer to the target frame.
+        output.update({
+            **diff_feats,
+            'rigids_0':               target_r0,
+            'torsion_angles_sin_cos': torsions[target_frame_idx],
+            'sc_ca_t':                output['atom14_pos'][:, 1, :],  # source CA [N, 3]
+        })
+        return output
