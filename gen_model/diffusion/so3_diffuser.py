@@ -308,14 +308,14 @@ class SO3Diffuser:
         omega = torch.linalg.norm(vec, dim=-1) + eps
         if self.use_cached_score:
             score_norms_t = self._score_norms[self.t_to_idx(move_to_np(t))]
-            score_norms_t = torch.tensor(score_norms_t).to(vec.device)
+            score_norms_t = torch.tensor(score_norms_t, dtype=torch.float32).to(vec.device)
             omega_idx = torch.bucketize(
-                omega, torch.tensor(self.discrete_omega[:-1]).to(vec.device))
+                omega, torch.tensor(self.discrete_omega[:-1], dtype=torch.float32).to(vec.device))
             omega_scores_t = torch.gather(
                 score_norms_t, 1, omega_idx)
         else:
             sigma = self.discrete_sigma[self.t_to_idx(move_to_np(t))]
-            sigma = torch.tensor(sigma).to(vec.device)
+            sigma = torch.tensor(sigma, dtype=torch.float32).to(vec.device)
             omega_vals = igso3_expansion(omega, sigma[:, None], use_torch=True)
             omega_scores_t = score(omega_vals, omega, sigma[:, None], use_torch=True)
         return omega_scores_t[..., None] * vec / (omega[..., None] + eps)

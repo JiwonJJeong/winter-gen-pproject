@@ -38,8 +38,8 @@ def _assemble_rigid(rotvec, trans):
         rotvec_shape[:-1] + (3, 3))
     return ru.Rigid(
             rots=ru.Rotation(
-                rot_mats=torch.Tensor(rotmat)),
-            trans=torch.tensor(trans))
+                rot_mats=torch.tensor(rotmat, dtype=torch.float32)),
+            trans=torch.tensor(trans, dtype=torch.float32))
 
 class SE3Diffuser:
 

@@ -1,5 +1,10 @@
 data/
 env/
 
+# Python bytecode (all subdirectories)
 __pycache__/
-gen_model/__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+lightning_logs/

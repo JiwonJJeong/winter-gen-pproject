@@ -642,7 +642,7 @@ class IpaScore(nn.Module):
             rigid_update = self.trunk[f'bb_update_{b}'](
                 node_embed * diffuse_mask[..., None])
             curr_rigids = curr_rigids.compose_q_update_vec(
-                rigid_update, diffuse_mask[..., None])
+                rigid_update * diffuse_mask[..., None])
 
             if b < self._ipa_conf.num_blocks-1:
                 edge_embed = self.trunk[f'edge_transition_{b}'](

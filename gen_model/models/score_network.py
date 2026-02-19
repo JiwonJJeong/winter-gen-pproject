@@ -186,6 +186,9 @@ class ScoreNetwork(nn.Module):
         fixed_mask = input_feats['fixed_mask'].type(torch.float32)
         edge_mask = bb_mask[..., None] * bb_mask[..., None, :]
 
+        # Normalise t to float32 — numpy scalars collate to float64 by default.
+        input_feats = {**input_feats, 't': input_feats['t'].float()}
+
         # Initial embeddings of positonal and relative indices.
         init_node_embed, init_edge_embed = self.embedding_layer(
             seq_idx=input_feats['seq_idx'],

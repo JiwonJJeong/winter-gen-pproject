@@ -12,11 +12,13 @@ Rigid = ru.Rigid
 Rotation = ru.Rotation
 
 # Residue Constants from OpenFold/AlphaFold2.
-IDEALIZED_POS37 = torch.tensor(residue_constants.restype_atom37_rigid_group_positions)
+# dtype=torch.float32 is explicit: numpy float64 arrays would otherwise produce
+# Double tensors that cause "expected Float but got Double" errors during backward.
+IDEALIZED_POS37 = torch.tensor(residue_constants.restype_atom37_rigid_group_positions, dtype=torch.float32)
 IDEALIZED_POS37_MASK = torch.any(IDEALIZED_POS37, axis=-1)
-IDEALIZED_POS = torch.tensor(residue_constants.restype_atom14_rigid_group_positions)
-DEFAULT_FRAMES = torch.tensor(residue_constants.restype_rigid_group_default_frame)
-ATOM_MASK = torch.tensor(residue_constants.restype_atom14_mask)
+IDEALIZED_POS = torch.tensor(residue_constants.restype_atom14_rigid_group_positions, dtype=torch.float32)
+DEFAULT_FRAMES = torch.tensor(residue_constants.restype_rigid_group_default_frame, dtype=torch.float32)
+ATOM_MASK = torch.tensor(residue_constants.restype_atom14_mask, dtype=torch.float32)
 GROUP_IDX = torch.tensor(residue_constants.restype_atom14_to_rigid_group)
 
 

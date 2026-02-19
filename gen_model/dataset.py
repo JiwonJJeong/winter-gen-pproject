@@ -354,7 +354,7 @@ class MDGenDataset(torch.utils.data.Dataset):
             
             # Noised structure (at time t) - from diffuser
             **diff_feats,
-            't': t,
+            't': np.float32(t),  # float32 so DataLoader collates to Float32 tensor
             
             # Self-conditioning (initially zeros)
             'sc_ca_t': torch.zeros(L, 3),
