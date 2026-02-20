@@ -23,9 +23,9 @@
 import torch
 import numpy as np
 
-from .rigid_utils import Rigid, Rotation
-from . import residue_constants as rc
-from .tensor_utils import batched_gather
+from gen_model.utils.rigid_utils import Rigid, Rotation
+from gen_model.data import residue_constants as rc
+from gen_model.utils.tensor_utils import batched_gather
 
 
 def atom14_to_atom37(atom14: np.ndarray, aatype, atom14_mask=None):

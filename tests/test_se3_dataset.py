@@ -5,8 +5,8 @@ from omegaconf import OmegaConf
 import sys
 sys.path.insert(0, '.')
 
-from gen_model.dataset import MDGenDataset
-from data_se3.data.se3_diffuser import SE3Diffuser
+from gen_model.data.dataset import MDGenDataset
+from gen_model.diffusion.se3_diffuser import SE3Diffuser
 
 
 def test_dataset():

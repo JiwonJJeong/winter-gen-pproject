@@ -1,8 +1,8 @@
 # Adapted from https://github.com/jasonkyuyim/se3_diffusion/
 """Utilities for calculating all atom representations."""
 import torch
-from gen_model import residue_constants
-from gen_model import rigid_utils as ru
+from gen_model.data import residue_constants
+from gen_model.utils import rigid_utils as ru
 try:
     from openfold.data import data_transforms
 except ImportError:

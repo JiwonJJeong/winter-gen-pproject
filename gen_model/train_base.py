@@ -1,11 +1,60 @@
-"""Shared base Lightning module for SE(3) score-matching diffusion.
+"""Shared base Lightning module and default configurations for SE(3) diffusion.
 
 Both unconditional and conditional DDPM inherit from SE3BaseModule.
 Subclasses only need to set self.model and optionally override _prepare_batch.
+
+Config helpers (default_se3_conf, default_model_conf, default_data_args) provide
+the canonical hyperparameters shared across all train scripts.
 """
 import torch
 import torch.nn.functional as F
 import lightning as L
+
+
+# ---------------------------------------------------------------------------
+# Shared default configurations
+# ---------------------------------------------------------------------------
+
+def default_se3_conf():
+    """Canonical SE(3) diffusion config: logarithmic SO3 schedule + R3 VP-SDE."""
+    from omegaconf import OmegaConf
+    return OmegaConf.create({
+        'diffuse_rot': True, 'diffuse_trans': True,
+        'so3': {'schedule': 'logarithmic', 'min_sigma': 0.1, 'max_sigma': 1.5,
+                'num_sigma': 1000, 'use_cached_score': False,
+                'cache_dir': '/tmp/igso3_cache', 'num_omega': 1000},
+        'r3':  {'min_b': 0.1, 'max_b': 20.0, 'coordinate_scaling': 0.1},
+    })
+
+
+def default_model_conf(use_temporal_embedding: bool = False):
+    """Canonical ScoreNetwork config: 256-dim IPA transformer + 128-dim edges.
+
+    Args:
+        use_temporal_embedding: Set True for conditional models to enable ϕ(k)
+            inside the Embedder (adds 32-dim temporal gap embedding to ϕ(t)).
+    """
+    from omegaconf import OmegaConf
+    return OmegaConf.create({
+        'node_embed_size': 256, 'edge_embed_size': 128,
+        'embed': {'index_embed_size': 32, 'embed_self_conditioning': True,
+                  'num_bins': 22, 'min_bin': 1e-5, 'max_bin': 20.0,
+                  'use_temporal_embedding': use_temporal_embedding},
+        'ipa': {'c_s': 256, 'c_z': 128, 'c_hidden': 16, 'no_heads': 12,
+                'no_qk_points': 4, 'no_v_points': 8, 'c_skip': 64,
+                'num_blocks': 4, 'coordinate_scaling': 0.1,
+                'seq_tfmr_num_heads': 4, 'seq_tfmr_num_layers': 2},
+    })
+
+
+def default_data_args(args):
+    """Build OmegaConf data config from parsed CLI args."""
+    from omegaconf import OmegaConf
+    return OmegaConf.create({
+        'data_dir': args.data_dir, 'atlas_csv': args.atlas_csv,
+        'train_split': args.train_split, 'suffix': args.suffix,
+        'frame_interval': None, 'crop_ratio': 0.95, 'min_t': 0.01,
+    })
 
 
 class SE3BaseModule(L.LightningModule):

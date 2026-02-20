@@ -260,7 +260,7 @@ def main():
 
     # Load model configuration from checkpoint or use default
     # For now, using default configuration - should match training
-    from gen_model.dataset import MDGenDataset
+    from gen_model.data.dataset import MDGenDataset
     from omegaconf import OmegaConf
 
     dataset_args = OmegaConf.create({

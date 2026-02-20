@@ -7,8 +7,8 @@ import math
 from scipy.stats import truncnorm
 import torch.nn as nn
 from typing import Optional, Callable, List, Sequence
-from gen_model.rigid_utils import Rigid
-from gen_model import all_atom
+from gen_model.utils.rigid_utils import Rigid
+from gen_model.data import all_atom
 
 
 def permute_final_dims(tensor: torch.Tensor, inds: List[int]):

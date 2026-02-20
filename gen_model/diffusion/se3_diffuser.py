@@ -4,7 +4,7 @@ import numpy as np
 from gen_model.diffusion import so3_diffuser
 from gen_model.diffusion import r3_diffuser
 from scipy.spatial.transform import Rotation
-from gen_model import rigid_utils as ru
+from gen_model.utils import rigid_utils as ru
 import torch
 import logging
 

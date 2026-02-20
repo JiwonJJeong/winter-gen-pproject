@@ -5,8 +5,8 @@ import math
 import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
-from gen_model import utils as du
-from gen_model import all_atom
+from gen_model.utils import utils as du
+from gen_model.data import all_atom
 from gen_model.models import ipa_pytorch
 import functools as fn
 
@@ -58,8 +58,25 @@ class Embedder(nn.Module):
         # Time step embedding
         index_embed_size = self._embed_conf.index_embed_size
         t_embed_size = index_embed_size
-        node_embed_dims = t_embed_size + 1
-        edge_in = (t_embed_size + 1) * 2
+
+        # Optional temporal-gap embedding ϕ(k), concatenated to ϕ(t).
+        # Enabled by embed.use_temporal_embedding = True in model_conf.
+        self._use_temporal = bool(getattr(self._embed_conf, 'use_temporal_embedding', False))
+        if self._use_temporal:
+            k_embed_size = index_embed_size
+            self.temporal_embedder = fn.partial(
+                get_index_embedding,
+                embed_size=k_embed_size,
+                max_len=2056,
+            )
+        else:
+            k_embed_size = 0
+
+        # Dimension of the combined [ϕ(t) | fixed_mask | ϕ(k)] node feature
+        tk_mask_size = t_embed_size + 1 + k_embed_size  # 33 or 65
+
+        node_embed_dims = tk_mask_size
+        edge_in = tk_mask_size * 2
 
         # Sequence index embedding
         node_embed_dims += index_embed_size
@@ -109,6 +126,7 @@ class Embedder(nn.Module):
             t,
             fixed_mask,
             self_conditioning_ca,
+            k=None,
         ):
         """Embeds a set of inputs
 
@@ -118,19 +136,29 @@ class Embedder(nn.Module):
             fixed_mask: mask of fixed (motif) residues.
             self_conditioning_ca: [..., N, 3] Ca positions of self-conditioning
                 input.
+            k: [B] integer temporal gap (signed frame-index difference).
+                Only used when use_temporal_embedding=True. Defaults to zeros.
 
         Returns:
             node_embed: [B, N, D_node]
             edge_embed: [B, N, N, D_edge]
         """
         num_batch, num_res = seq_idx.shape
-        node_feats = []
 
-        # Set time step to epsilon=1e-5 for fixed residues.
+        # Timestep embedding ϕ(t), tiled over residues and appended with fixed mask.
         fixed_mask = fixed_mask[..., None]
         prot_t_embed = torch.tile(
             self.timestep_embedder(t)[:, None, :], (1, num_res, 1))
         prot_t_embed = torch.cat([prot_t_embed, fixed_mask], dim=-1)
+
+        # Temporal gap embedding ϕ(k), concatenated to ϕ(t) when enabled.
+        if self._use_temporal:
+            if k is None:
+                k = torch.zeros(num_batch, dtype=torch.long, device=seq_idx.device)
+            k_embed = torch.tile(
+                self.temporal_embedder(k.float())[:, None, :], (1, num_res, 1))
+            prot_t_embed = torch.cat([prot_t_embed, k_embed], dim=-1)
+
         node_feats = [prot_t_embed]
         pair_feats = [self._cross_concat(prot_t_embed, num_batch, num_res)]
 
@@ -190,11 +218,14 @@ class ScoreNetwork(nn.Module):
         input_feats = {**input_feats, 't': input_feats['t'].float()}
 
         # Initial embeddings of positonal and relative indices.
+        # k is the signed frame-index gap used in conditional training;
+        # absent in unconditional batches (defaults to zeros inside Embedder).
         init_node_embed, init_edge_embed = self.embedding_layer(
             seq_idx=input_feats['seq_idx'],
             t=input_feats['t'],
             fixed_mask=fixed_mask,
             self_conditioning_ca=input_feats['sc_ca_t'],
+            k=input_feats.get('k', None),
         )
         edge_embed = init_edge_embed * edge_mask[..., None]
         node_embed = init_node_embed * bb_mask[..., None]

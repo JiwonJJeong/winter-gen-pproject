@@ -3,7 +3,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 
-from .tensor_utils import tensor_tree_map
+from gen_model.utils.tensor_utils import tensor_tree_map
 
 
 class ExponentialMovingAverage:

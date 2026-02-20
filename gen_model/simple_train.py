@@ -123,7 +123,7 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
 
     from omegaconf import OmegaConf
-    from gen_model.dataset import MDGenDataset
+    from gen_model.data.dataset import MDGenDataset
     from gen_model.diffusion.se3_diffuser import SE3Diffuser
 
     se3_conf = OmegaConf.create({
