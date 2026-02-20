@@ -131,7 +131,7 @@ def main():
         'so3': {'schedule': 'logarithmic', 'min_sigma': 0.1, 'max_sigma': 1.5,
                 'num_sigma': 1000, 'use_cached_score': False,
                 'cache_dir': '/tmp/igso3_cache', 'num_omega': 1000},
-        'r3':  {'min_b': 0.1, 'max_b': 20.0, 'coordinate_scaling': 0.1},
+        'r3':  {'min_b': 0.1, 'max_b': 20.0},
     })
     model_conf = OmegaConf.create({
         'node_embed_size': 256, 'edge_embed_size': 128,
@@ -139,7 +139,7 @@ def main():
                   'num_bins': 22, 'min_bin': 1e-5, 'max_bin': 20.0},
         'ipa': {'c_s': 256, 'c_z': 128, 'c_hidden': 16, 'no_heads': 12,
                 'no_qk_points': 4, 'no_v_points': 8, 'c_skip': 64,
-                'num_blocks': 4, 'coordinate_scaling': 0.1,
+                'num_blocks': 4,
                 'seq_tfmr_num_heads': 4, 'seq_tfmr_num_layers': 2},
     })
 

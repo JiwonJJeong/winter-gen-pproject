@@ -125,9 +125,9 @@ class SE3Diffuser:
     def calc_trans_0(self, trans_score, trans_t, t):
         return self._r3_diffuser.calc_trans_0(trans_score, trans_t, t)
 
-    def calc_trans_score(self, trans_t, trans_0, t, use_torch=False, scale=True):
+    def calc_trans_score(self, trans_t, trans_0, t, use_torch=False):
         return self._r3_diffuser.score(
-            trans_t, trans_0, t, use_torch=use_torch, scale=scale)
+            trans_t, trans_0, t, use_torch=use_torch)
 
     def calc_rot_score(self, rots_t, rots_0, t):
         rots_0_inv = rots_0.invert()

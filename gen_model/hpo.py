@@ -80,7 +80,7 @@ def _build_se3_conf(hp: dict):
             'schedule_gamma': hp['so3_schedule_gamma'],
         },
         'r3': {
-            'min_b': 0.1, 'max_b': 20.0, 'coordinate_scaling': 0.1,
+            'min_b': 0.1, 'max_b': 20.0,
             'schedule_gamma': hp['r3_schedule_gamma'],
         },
     })

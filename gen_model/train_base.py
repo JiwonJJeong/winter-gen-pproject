@@ -24,8 +24,7 @@ def default_se3_conf():
                 'num_sigma': 1000, 'use_cached_score': False,
                 'cache_dir': '/tmp/igso3_cache', 'num_omega': 1000,
                 'schedule_gamma': 1.0},
-        'r3':  {'min_b': 0.1, 'max_b': 20.0, 'coordinate_scaling': 0.1,
-                'schedule_gamma': 1.0},
+        'r3':  {'min_b': 0.1, 'max_b': 20.0, 'schedule_gamma': 1.0},
     })
 
 
@@ -48,7 +47,7 @@ def default_model_conf(use_temporal_embedding: bool = False,
                   'use_temporal_embedding': use_temporal_embedding},
         'ipa': {'c_s': 256, 'c_z': 128, 'c_hidden': 16, 'no_heads': 12,
                 'no_qk_points': 4, 'no_v_points': 8, 'c_skip': 64,
-                'num_blocks': 4, 'coordinate_scaling': 0.1,
+                'num_blocks': 4,
                 'seq_tfmr_num_heads': 4, 'seq_tfmr_num_layers': 2},
         'lora': {
             'enabled': lora_r > 0,

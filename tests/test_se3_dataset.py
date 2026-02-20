@@ -27,7 +27,6 @@ def test_dataset():
         'r3': {
             'min_b': 0.1,
             'max_b': 20.0,
-            'coordinate_scaling': 0.1,  # Scale Angstroms to ~1.0 range
         }
     })
     diffuser = SE3Diffuser(se3_conf)

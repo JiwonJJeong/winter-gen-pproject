@@ -14,7 +14,6 @@ class R3Diffuser:
             min_b: starting value in variance schedule.
             max_b: ending value in variance schedule.
         """
-        self._r3_conf = r3_conf
         self.min_b = r3_conf.min_b
         self.max_b = r3_conf.max_b
 
@@ -22,12 +21,6 @@ class R3Diffuser:
         # remain the true integral of b_t: B(t) = min_b·t + (max_b-min_b)·t^(γ+1)/(γ+1).
         # At γ=1.0 this reduces to the original formula exactly.
         self.schedule_gamma = float(getattr(r3_conf, 'schedule_gamma', 1.0))
-
-    def _scale(self, x):
-        return x * self._r3_conf.coordinate_scaling
-
-    def _unscale(self, x):
-        return x / self._r3_conf.coordinate_scaling
 
     def b_t(self, t):
         if np.any(t < 0) or np.any(t > 1):
@@ -64,23 +57,20 @@ class R3Diffuser:
         """Samples marginal p(x(t) | x(t-1)).
 
         Args:
-            x_0: [..., n, 3] initial positions in Angstroms.
+            x_t_1: [..., n, 3] positions at time t-1 in dataset-normalised units.
             t: continuous time in [0, 1].
 
         Returns:
-            x_t: [..., n, 3] positions at time t in Angstroms.
-            score_t: [..., n, 3] score at time t in scaled Angstroms.
+            x_t: [..., n, 3] positions at time t in dataset-normalised units.
         """
         if not np.isscalar(t):
             raise ValueError(f'{t} must be a scalar.')
-        x_t_1 = self._scale(x_t_1)
         b_t = torch.tensor(self.marginal_b_t(t) / num_t).to(x_t_1.device)
         z_t_1 = torch.tensor(np.random.normal(size=x_t_1.shape)).to(x_t_1.device)
         x_t = torch.sqrt(1 - b_t) * x_t_1 + torch.sqrt(b_t) * z_t_1
         return x_t
 
     def distribution(self, x_t, score_t, t, mask, dt):
-        x_t = self._scale(x_t)
         g_t = self.diffusion_coef(t)
         f_t = self.drift_coef(x_t, t)
         std = g_t * np.sqrt(dt)
@@ -93,22 +83,20 @@ class R3Diffuser:
         """Samples marginal p(x(t) | x(0)).
 
         Args:
-            x_0: [..., n, 3] initial positions in Angstroms.
+            x_0: [..., n, 3] initial positions in dataset-normalised units.
             t: continuous time in [0, 1].
 
         Returns:
-            x_t: [..., n, 3] positions at time t in Angstroms.
-            score_t: [..., n, 3] score at time t in scaled Angstroms.
+            x_t: [..., n, 3] positions at time t in dataset-normalised units.
+            score_t: [..., n, 3] score at time t in dataset-normalised units.
         """
         if not np.isscalar(t):
             raise ValueError(f'{t} must be a scalar.')
-        x_0 = self._scale(x_0)
         x_t = np.random.normal(
             loc=np.exp(-1/2*self.marginal_b_t(t)) * x_0,
             scale=np.sqrt(1 - np.exp(-self.marginal_b_t(t)))
         )
         score_t = self.score(x_t, x_0, t)
-        x_t = self._unscale(x_t)
         return x_t, score_t
 
     def score_scaling(self, t: float):
@@ -125,21 +113,20 @@ class R3Diffuser:
             center: bool=True,
             noise_scale: float=1.0,
         ):
-        """Simulates the reverse SDE for 1 step
+        """Simulates the reverse SDE for 1 step.
 
         Args:
-            x_t: [..., 3] current positions at time t in angstroms.
-            score_t: [..., 3] rotation score at time t.
+            x_t: [..., 3] current positions at time t in dataset-normalised units.
+            score_t: [..., 3] translation score at time t.
             t: continuous time in [0, 1].
             dt: continuous step size in [0, 1].
             mask: True indicates which residues to diffuse.
 
         Returns:
-            [..., 3] positions at next step t-1.
+            [..., 3] positions at next step t-1 in dataset-normalised units.
         """
         if not np.isscalar(t):
             raise ValueError(f'{t} must be a scalar.')
-        x_t = self._scale(x_t)
         g_t = self.diffusion_coef(t)
         f_t = self.drift_coef(x_t, t)
         z = noise_scale * np.random.normal(size=score_t.shape)
@@ -153,7 +140,6 @@ class R3Diffuser:
         if center:
             com = np.sum(x_t_1, axis=-2) / np.sum(mask, axis=-1)[..., None]
             x_t_1 -= com[..., None, :]
-        x_t_1 = self._unscale(x_t_1)
         return x_t_1
 
     def conditional_var(self, t, use_torch=False):
@@ -166,12 +152,9 @@ class R3Diffuser:
             return 1 - torch.exp(-self.marginal_b_t(t))
         return 1 - np.exp(-self.marginal_b_t(t))
 
-    def score(self, x_t, x_0, t, use_torch=False, scale=False):
+    def score(self, x_t, x_0, t, use_torch=False):
         if use_torch:
             exp_fn = torch.exp
         else:
             exp_fn = np.exp
-        if scale:
-            x_t = self._scale(x_t)
-            x_0 = self._scale(x_0)
         return -(x_t - exp_fn(-1/2*self.marginal_b_t(t)) * x_0) / self.conditional_var(t, use_torch=use_torch)

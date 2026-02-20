@@ -566,11 +566,6 @@ class IpaScore(nn.Module):
         self._ipa_conf = ipa_conf
         self.diffuser = diffuser
 
-        self.scale_pos = lambda x: x * ipa_conf.coordinate_scaling
-        self.scale_rigids = lambda x: x.apply_trans_fn(self.scale_pos)
-
-        self.unscale_pos = lambda x: x / ipa_conf.coordinate_scaling
-        self.unscale_rigids = lambda x: x.apply_trans_fn(self.unscale_pos)
         self.trunk = nn.ModuleDict()
 
         for b in range(ipa_conf.num_blocks):
@@ -620,7 +615,6 @@ class IpaScore(nn.Module):
         init_rots = init_rigids.get_rots()
 
         # Main trunk
-        curr_rigids = self.scale_rigids(curr_rigids)
         init_node_embed = init_node_embed * node_mask[..., None]
         node_embed = init_node_embed * node_mask[..., None]
         for b in range(self._ipa_conf.num_blocks):
@@ -655,7 +649,6 @@ class IpaScore(nn.Module):
         )
         rot_score = rot_score * node_mask[..., None]
 
-        curr_rigids = self.unscale_rigids(curr_rigids)
         trans_score = self.diffuser.calc_trans_score(
             init_rigids.get_trans(),
             curr_rigids.get_trans(),
