@@ -18,6 +18,11 @@ class R3Diffuser:
         self.min_b = r3_conf.min_b
         self.max_b = r3_conf.max_b
 
+        # schedule_gamma warps t → t^γ in b_t.  marginal_b_t is updated to
+        # remain the true integral of b_t: B(t) = min_b·t + (max_b-min_b)·t^(γ+1)/(γ+1).
+        # At γ=1.0 this reduces to the original formula exactly.
+        self.schedule_gamma = float(getattr(r3_conf, 'schedule_gamma', 1.0))
+
     def _scale(self, x):
         return x * self._r3_conf.coordinate_scaling
 
@@ -27,7 +32,8 @@ class R3Diffuser:
     def b_t(self, t):
         if np.any(t < 0) or np.any(t > 1):
             raise ValueError(f'Invalid t={t}')
-        return self.min_b + t*(self.max_b - self.min_b)
+        t_w = np.asarray(t, dtype=float) ** self.schedule_gamma
+        return self.min_b + t_w * (self.max_b - self.min_b)
 
     def diffusion_coef(self, t):
         """Time-dependent diffusion coefficient."""
@@ -41,7 +47,11 @@ class R3Diffuser:
         return np.random.normal(size=(n_samples, 3))
 
     def marginal_b_t(self, t):
-        return t*self.min_b + (1/2)*(t**2)*(self.max_b-self.min_b)
+        # True integral of b_t(s) = min_b + s^γ·(max_b - min_b) from 0 to t:
+        #   B(t) = min_b·t + (max_b - min_b)·t^(γ+1)/(γ+1)
+        # At γ=1: B(t) = min_b·t + (max_b-min_b)·t²/2  ← matches original exactly.
+        g = self.schedule_gamma
+        return self.min_b * t + (self.max_b - self.min_b) * (t ** (g + 1)) / (g + 1)
 
     def calc_trans_0(self, score_t, x_t, t, use_torch=True):
         beta_t = self.marginal_b_t(t)

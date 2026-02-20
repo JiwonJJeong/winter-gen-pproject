@@ -145,14 +145,21 @@ class SO3Diffuser:
         self.use_cached_score = so3_conf.use_cached_score
         self._log = logging.getLogger(__name__)
 
+        # schedule_gamma warps t → t^γ before sigma(t) is computed.
+        # γ=1.0 is the default (no warp).  γ<1 accelerates early noise;
+        # γ>1 slows early noise.  Boundaries min_sigma / max_sigma are unchanged.
+        self.schedule_gamma = float(getattr(so3_conf, 'schedule_gamma', 1.0))
+
         # Discretize omegas for calculating CDFs. Skip omega=0.
         self.discrete_omega = np.linspace(0, np.pi, so3_conf.num_omega+1)[1:]
 
         # Precompute IGSO3 values.
+        # schedule_gamma is included in the cache path so different curvatures
+        # do not collide on the same precomputed tables.
         replace_period = lambda x: str(x).replace('.', '_')
         cache_dir = os.path.join(
             so3_conf.cache_dir,
-            f'eps_{so3_conf.num_sigma}_omega_{so3_conf.num_omega}_min_sigma_{replace_period(so3_conf.min_sigma)}_max_sigma_{replace_period(so3_conf.max_sigma)}_schedule_{so3_conf.schedule}'
+            f'eps_{so3_conf.num_sigma}_omega_{so3_conf.num_omega}_min_sigma_{replace_period(so3_conf.min_sigma)}_max_sigma_{replace_period(so3_conf.max_sigma)}_schedule_{so3_conf.schedule}_gamma_{replace_period(self.schedule_gamma)}'
         )
 
         # If cache directory doesn't exist, create it
@@ -206,11 +213,17 @@ class SO3Diffuser:
         return np.digitize(sigma, self.discrete_sigma) - 1
 
     def sigma(self, t: np.ndarray):
-        """Extract \sigma(t) corresponding to chosen sigma schedule."""
+        """Extract \sigma(t) corresponding to chosen sigma schedule.
+
+        t is warped as t^schedule_gamma before the schedule formula so the
+        curvature of noise accumulation can be tuned without changing the
+        boundary values sigma(0)=min_sigma and sigma(1)=max_sigma.
+        """
         if np.any(t < 0) or np.any(t > 1):
             raise ValueError(f'Invalid t={t}')
         if self.schedule == 'logarithmic':
-            return np.log(t * np.exp(self.max_sigma) + (1 - t) * np.exp(self.min_sigma))
+            t_w = np.asarray(t, dtype=float) ** self.schedule_gamma
+            return np.log(t_w * np.exp(self.max_sigma) + (1 - t_w) * np.exp(self.min_sigma))
         else:
             raise ValueError(f'Unrecognize schedule {self.schedule}')
 

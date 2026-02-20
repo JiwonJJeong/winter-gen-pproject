@@ -22,8 +22,10 @@ def default_se3_conf():
         'diffuse_rot': True, 'diffuse_trans': True,
         'so3': {'schedule': 'logarithmic', 'min_sigma': 0.1, 'max_sigma': 1.5,
                 'num_sigma': 1000, 'use_cached_score': False,
-                'cache_dir': '/tmp/igso3_cache', 'num_omega': 1000},
-        'r3':  {'min_b': 0.1, 'max_b': 20.0, 'coordinate_scaling': 0.1},
+                'cache_dir': '/tmp/igso3_cache', 'num_omega': 1000,
+                'schedule_gamma': 1.0},
+        'r3':  {'min_b': 0.1, 'max_b': 20.0, 'coordinate_scaling': 0.1,
+                'schedule_gamma': 1.0},
     })
 
 
