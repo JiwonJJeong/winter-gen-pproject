@@ -32,7 +32,9 @@ class SE3Module(SE3BaseModule):
         self.save_hyperparameters(ignore=['model_conf', 'se3_conf'])
         from gen_model.diffusion.se3_diffuser import SE3Diffuser
         from gen_model.models.score_network import ScoreNetwork
+        from gen_model.models.lora import apply_lora
         self.model = ScoreNetwork(model_conf, SE3Diffuser(se3_conf))
+        apply_lora(self.model, model_conf.lora)
 
 
 def main():
@@ -46,6 +48,10 @@ def main():
     parser.add_argument('--epochs',      type=int,   default=100)
     parser.add_argument('--lr',          type=float, default=1e-4)
     parser.add_argument('--save_dir',    type=str,   default='checkpoints/se3')
+    parser.add_argument('--lora_r',     type=int,   default=0,
+                        help='LoRA rank; 0 = disabled (full fine-tuning)')
+    parser.add_argument('--lora_alpha', type=float, default=0.0,
+                        help='LoRA alpha scaling; defaults to 2*lora_r when 0')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -54,7 +60,7 @@ def main():
     from gen_model.diffusion.se3_diffuser import SE3Diffuser
 
     se3_conf   = default_se3_conf()
-    model_conf = default_model_conf()
+    model_conf = default_model_conf(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
     data_args  = default_data_args(args)
     diffuser   = SE3Diffuser(se3_conf)
     train_dataset = MDGenDataset(args=data_args, diffuser=diffuser, mode='train')

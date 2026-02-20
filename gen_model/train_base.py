@@ -27,14 +27,18 @@ def default_se3_conf():
     })
 
 
-def default_model_conf(use_temporal_embedding: bool = False):
+def default_model_conf(use_temporal_embedding: bool = False,
+                       lora_r: int = 0, lora_alpha: float = 0.0):
     """Canonical ScoreNetwork config: 256-dim IPA transformer + 128-dim edges.
 
     Args:
         use_temporal_embedding: Set True for conditional models to enable ϕ(k)
             inside the Embedder (adds 32-dim temporal gap embedding to ϕ(t)).
+        lora_r: LoRA rank.  0 = disabled (full fine-tuning).
+        lora_alpha: LoRA scaling factor.  Defaults to 2*lora_r when 0.
     """
     from omegaconf import OmegaConf
+    _r = max(lora_r, 1)  # avoid div-by-zero in alpha default; enabled flag gates usage
     return OmegaConf.create({
         'node_embed_size': 256, 'edge_embed_size': 128,
         'embed': {'index_embed_size': 32, 'embed_self_conditioning': True,
@@ -44,6 +48,18 @@ def default_model_conf(use_temporal_embedding: bool = False):
                 'no_qk_points': 4, 'no_v_points': 8, 'c_skip': 64,
                 'num_blocks': 4, 'coordinate_scaling': 0.1,
                 'seq_tfmr_num_heads': 4, 'seq_tfmr_num_layers': 2},
+        'lora': {
+            'enabled': lora_r > 0,
+            'r': _r,
+            'alpha': lora_alpha if lora_alpha > 0.0 else float(2 * _r),
+            # IPA attention Q/K/V/O + MLP layers in StructureModuleTransition,
+            # TorsionAngles, and ScoreLayer.  Geometric projections (linear_q_points,
+            # linear_kv_points, linear_b, down_z) and tiny output heads are excluded.
+            'target_modules': [
+                'linear_q', 'linear_kv', 'linear_out',
+                'linear_1', 'linear_2',
+            ],
+        },
     })
 
 

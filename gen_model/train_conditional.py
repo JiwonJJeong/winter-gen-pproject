@@ -74,7 +74,9 @@ class ConditionalSE3Module(SE3BaseModule):
         self.save_hyperparameters(ignore=['model_conf', 'se3_conf'])
         from gen_model.diffusion.se3_diffuser import SE3Diffuser
         from gen_model.models.score_network import ScoreNetwork
+        from gen_model.models.lora import apply_lora
         self.model = ScoreNetwork(model_conf, SE3Diffuser(se3_conf))
+        apply_lora(self.model, model_conf.lora)
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,10 @@ def main():
                         help='Maximum |k| sampled at full curriculum (paper: 3)')
     parser.add_argument('--grow_every',  type=int,   default=10,
                         help='Epochs between each +1 increase in current_max_k')
+    parser.add_argument('--lora_r',     type=int,   default=0,
+                        help='LoRA rank; 0 = disabled (full fine-tuning)')
+    parser.add_argument('--lora_alpha', type=float, default=0.0,
+                        help='LoRA alpha scaling; defaults to 2*lora_r when 0')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -107,7 +113,8 @@ def main():
     from gen_model.diffusion.se3_diffuser import SE3Diffuser
 
     se3_conf   = default_se3_conf()
-    model_conf = default_model_conf(use_temporal_embedding=True)  # enables ϕ(k)
+    model_conf = default_model_conf(use_temporal_embedding=True,   # enables ϕ(k)
+                                    lora_r=args.lora_r, lora_alpha=args.lora_alpha)
     data_args  = default_data_args(args)
     diffuser   = SE3Diffuser(se3_conf)
 
