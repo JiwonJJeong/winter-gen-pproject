@@ -14,12 +14,20 @@ physically motivated defaults.  Only the *shape* of the schedule is searched.
 The study is stored in an SQLite file so it can be resumed and run with
 multiple parallel workers (``--n_jobs`` in study.optimize).
 
-ASHA pruning (step 3) is a drop-in: replace NopPruner with
-``optuna.pruners.SuccessiveHalvingPruner()``.
+Pruner options (--pruner):
+  none  (default) : run all trials to completion — useful for initial exploration
+  asha            : Asynchronous Successive Halving (ASHA) via Optuna's
+                    SuccessiveHalvingPruner.  Terminates unpromising trials early
+                    based on intermediate val_loss reported each epoch.
+                    Tune with --asha_min_resource and --asha_reduction_factor.
 
 Usage:
+    # No pruning (baseline exploration)
     python gen_model/hpo.py --mode unconditional --data_dir data --n_trials 20
-    python gen_model/hpo.py --mode conditional   --data_dir data --n_trials 20
+
+    # ASHA: keep top 1/3 at each rung, first rung at epoch 2
+    python gen_model/hpo.py --mode unconditional --data_dir data --n_trials 50 \\
+        --pruner asha --asha_min_resource 2 --asha_reduction_factor 3
 
     # Resume a previous study (load_if_exists=True keeps all past trials):
     python gen_model/hpo.py --mode unconditional --data_dir data --n_trials 10
@@ -180,6 +188,30 @@ def make_objective(args):
 
 
 # ---------------------------------------------------------------------------
+# Pruner factory
+# ---------------------------------------------------------------------------
+
+def _build_pruner(args) -> optuna.pruners.BasePruner:
+    """Construct the Optuna pruner from parsed CLI args.
+
+    'none'  → NopPruner  (no early stopping; all trials run to completion)
+    'asha'  → SuccessiveHalvingPruner implementing ASHA.
+
+    ASHA parameters:
+        min_resource       : earliest epoch at which a trial can be pruned.
+                             Set to ≥ epochs_per_trial/4 so trials get a fair start.
+        reduction_factor   : at each rung, keep the top 1/factor trials.
+                             factor=3 means ~33% survive each bracket level.
+    """
+    if args.pruner == 'asha':
+        return optuna.pruners.SuccessiveHalvingPruner(
+            min_resource=args.asha_min_resource,
+            reduction_factor=args.asha_reduction_factor,
+        )
+    return optuna.pruners.NopPruner()
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -200,15 +232,24 @@ def main():
                         help='Training epochs per trial (keep short for HPO)')
     parser.add_argument('--save_dir',         type=str,   default='checkpoints/hpo',
                         help='Directory for SQLite DB and per-trial checkpoints')
+    # Pruner selection
+    parser.add_argument('--pruner',               type=str,   default='none',
+                        choices=['none', 'asha'],
+                        help='Trial pruning strategy (none = run all trials to completion)')
+    parser.add_argument('--asha_min_resource',    type=int,   default=1,
+                        help='ASHA: minimum epochs before a trial can be pruned')
+    parser.add_argument('--asha_reduction_factor',type=int,   default=3,
+                        help='ASHA: keep top 1/reduction_factor trials at each rung')
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
 
+    pruner = _build_pruner(args)
     study = optuna.create_study(
         direction='minimize',
         storage=f'sqlite:///{args.save_dir}/optuna.db',
         study_name=f'se3_{args.mode}',
         load_if_exists=True,      # resume seamlessly if the study already exists
-        pruner=optuna.pruners.NopPruner(),  # ASHA: swap in SuccessiveHalvingPruner()
+        pruner=pruner,
     )
     study.optimize(
         make_objective(args),
@@ -216,7 +257,8 @@ def main():
         catch=(Exception,),   # log failures as failed trials rather than crashing
     )
 
-    print(f'\n=== HPO complete: {len(study.trials)} total trials ===')
+    pruner_name = 'ASHA' if args.pruner == 'asha' else 'none'
+    print(f'\n=== HPO complete: {len(study.trials)} total trials | pruner={pruner_name} ===')
     best = study.best_trial
     print(f'Best val_loss : {best.value:.6f}  (trial #{best.number})')
     print('Best params:')
