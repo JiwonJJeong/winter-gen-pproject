@@ -245,7 +245,6 @@ class SE3Diffuser:
             trans_impute, rot_impute = _extract_trans_rots(impute)
             trans_impute = trans_impute.reshape((n_samples, 3))
             rot_impute = rot_impute.reshape((n_samples, 3))
-            trans_impute = self._r3_diffuser._scale(trans_impute)
 
         if diffuse_mask is not None and impute is None:
             raise ValueError('Must provide imputation values.')
@@ -274,7 +273,6 @@ class SE3Diffuser:
                 rot_ref, rot_impute, diffuse_mask[..., None])
             trans_ref = self._apply_mask(
                 trans_ref, trans_impute, diffuse_mask[..., None])
-        trans_ref = self._r3_diffuser._unscale(trans_ref)
         rigids_t = _assemble_rigid(rot_ref, trans_ref)
         if as_tensor_7:
             rigids_t = rigids_t.to_tensor_7()
