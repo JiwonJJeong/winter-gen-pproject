@@ -9,6 +9,7 @@ This guide helps you understand and tune the hyperparameters in the simple DDPM 
 | **Diffusion** | timesteps | 1000 | 100-1000 | Higher = slower inference | More steps = smoother denoising |
 | | beta_start | 0.0001 | 0.0001-0.001 | Minimal | Lower = gradual initial noising |
 | | beta_end | 0.02 | 0.01-0.05 | Minimal | Higher = more final noise |
+| | noise_scale | 1.0 | 0.0-1.0 | Inference only | Controls stochasticity of reverse SDE |
 | **Model** | hidden_dim | 256 | 128-512 | Larger = slower, more memory | Larger = more capacity |
 | | time_emb_dim | 128 | 64-256 | Minimal impact | Larger = better time conditioning |
 | **Training** | batch_size | 8 | 2-32 | Larger = faster but needs GPU memory | Larger = more stable gradients |
@@ -60,6 +61,27 @@ This guide helps you understand and tune the hyperparameters in the simple DDPM 
 - ⬇️ Lower = Less noise, may not fully destroy signal
 
 **Alternative:** Consider implementing cosine noise schedule for potentially better results.
+
+#### `noise_scale` (Default: 1.0)
+**What it does:** Scales the stochastic noise injected at each reverse diffusion step. Only affects inference, not training.
+
+- **`1.0`**: Full reverse SDE — theoretically correct, maximally diverse samples
+- **`0.5–0.8`**: Reduced noise — smoother trajectories, often better sample quality for protein conformations
+- **`0.0`**: Deterministic probability flow ODE — fully reproducible, no randomness
+
+**How to tune:**
+- Start with `1.0` as the baseline
+- Try `0.5` and `0.8` if samples look noisy or physically implausible
+- Use `0.0` if you need reproducible outputs or want to compare samples directly
+
+**Trade-offs:**
+- ⬆️ Higher = More diverse samples, higher variance, may produce unrealistic structures
+- ⬇️ Lower = Smoother, more deterministic trajectories, less diversity
+
+**CLI usage** (inference_conditional.py):
+```bash
+python gen_model/inference_conditional.py --noise_scale 0.5 ...
+```
 
 ### 2. Model Architecture Parameters
 
