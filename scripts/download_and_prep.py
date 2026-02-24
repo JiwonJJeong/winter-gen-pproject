@@ -7,7 +7,7 @@ import sys
 # Add project root to path to import scripts
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from scripts.prep_sims import traj_to_atom14
-from gen_model.split import create_split
+from gen_model.data.split import create_split
 import mdtraj
 import numpy as np
 import tqdm
