@@ -384,7 +384,7 @@ def show_py3dmol_trajectory(
 
     view = py3Dmol.view(width=width, height=height)
     view.addModelsAsFrames(pdb_str, 'pdb')
-    view.setStyle({}, {'trace': {'color': color, 'radius': radius}})
+    view.setStyle({}, {'cartoon': {'color': color, 'thickness': radius}})
     if sphere_radius > 0:
         view.addStyle({}, {'sphere': {'color': _sc, 'radius': sphere_radius}})
     view.zoomTo()
@@ -446,7 +446,7 @@ def show_py3dmol_overlay(
         pdb_str = _build_pdb_string(frame0, seqres)
         _sc = _SPHERE_DEFAULTS.get(color, color)
         view.addModel(pdb_str, 'pdb')
-        view.setStyle({'model': idx}, {'trace': {'color': color,  'radius': radius}})
+        view.setStyle({'model': idx}, {'cartoon': {'color': color, 'thickness': radius}})
         view.addStyle({'model': idx}, {'sphere': {'color': _sc, 'radius': radius}})
     view.zoomTo()
     return view
