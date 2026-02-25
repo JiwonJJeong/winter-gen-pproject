@@ -309,6 +309,7 @@ class InvariantPointAttention(nn.Module):
         mask: torch.Tensor,
         _offload_inference: bool = False,
         _z_reference_list: Optional[Sequence[torch.Tensor]] = None,
+        local_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -414,8 +415,11 @@ class InvariantPointAttention(nn.Module):
         # [*, H, N_res, N_res]
         pt_att = permute_final_dims(pt_att, (2, 0, 1))
         
-        a = a + pt_att 
+        a = a + pt_att
         a = a + square_mask.unsqueeze(-3)
+        if local_mask is not None:
+            # [*, N, N] → [*, 1, N, N] to broadcast over heads
+            a = a + local_mask.unsqueeze(-3)
         a = self.softmax(a)
 
         ################
@@ -614,22 +618,53 @@ class IpaScore(nn.Module):
         init_rigids = Rigid.from_tensor_7(init_frames)
         init_rots = init_rigids.get_rots()
 
+        # IPA Gaussian spatial bias: -(2·dist/cutoff)² added to logits before softmax.
+        # User provides cutoff in Å: attention ≈100% at 0, ~37% at cutoff/2, ~2% at cutoff.
+        # Internally σ = cutoff/2 so that exp(-(dist/σ)²) ≈ 2% at dist=cutoff.
+        # 0 = disabled (global attention).
+        _ipa_cutoff_A = float(getattr(self._ipa_conf, 'local_attn_sigma', 0.0))
+        _coord_scale = 1.0
+        if _ipa_cutoff_A > 0.0:
+            _cs = input_feats.get('coord_scale', None)
+            _coord_scale = float(_cs.float().mean()) if _cs is not None else 1.0
+
+        # Sequence transformer Gaussian bias: -(2·|i-j|/cutoff)² added to logits.
+        # User provides cutoff in residues: ~2% attention at |i-j|=cutoff.
+        # Computed once before the loop — sequence distance is fixed.
+        _seq_cutoff = float(getattr(self._ipa_conf, 'seq_tfmr_sigma', 0.0))
+        _seq_tfmr_mask = None
+        if _seq_cutoff > 0.0:
+            num_res = node_mask.shape[-1]
+            idx = torch.arange(num_res, device=node_mask.device, dtype=torch.float32)
+            seq_dist = torch.abs(idx.unsqueeze(0) - idx.unsqueeze(1))  # [N, N]
+            _seq_tfmr_mask = -(2.0 * seq_dist / _seq_cutoff) ** 2
+
         # Main trunk
         init_node_embed = init_node_embed * node_mask[..., None]
         node_embed = init_node_embed * node_mask[..., None]
         for b in range(self._ipa_conf.num_blocks):
+            # Gaussian spatial bias recomputed each block as frames are refined.
+            local_mask = None
+            if _ipa_cutoff_A > 0.0:
+                ca = curr_rigids.get_trans()                        # [B, N, 3] scaled
+                dist = torch.norm(
+                    ca.unsqueeze(-2) - ca.unsqueeze(-3), dim=-1)    # [B, N, N]
+                local_mask = -(2.0 * dist / (_ipa_cutoff_A * _coord_scale)) ** 2
+
             ipa_embed = self.trunk[f'ipa_{b}'](
                 node_embed,
                 edge_embed,
                 curr_rigids,
-                node_mask)
+                node_mask,
+                local_mask=local_mask)
             ipa_embed *= node_mask[..., None]
             node_embed = self.trunk[f'ipa_ln_{b}'](node_embed + ipa_embed)
             seq_tfmr_in = torch.cat([
                 node_embed, self.trunk[f'skip_embed_{b}'](init_node_embed)
             ], dim=-1)
             seq_tfmr_out = self.trunk[f'seq_tfmr_{b}'](
-                seq_tfmr_in, src_key_padding_mask=1 - node_mask)
+                seq_tfmr_in, mask=_seq_tfmr_mask,
+                src_key_padding_mask=1 - node_mask)
             node_embed = node_embed + self.trunk[f'post_tfmr_{b}'](seq_tfmr_out)
             node_embed = self.trunk[f'node_transition_{b}'](node_embed)
             node_embed = node_embed * node_mask[..., None]

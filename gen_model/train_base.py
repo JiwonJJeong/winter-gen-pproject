@@ -29,7 +29,9 @@ def default_se3_conf():
 
 
 def default_model_conf(use_temporal_embedding: bool = False,
-                       lora_r: int = 0, lora_alpha: float = 0.0):
+                       lora_r: int = 0, lora_alpha: float = 0.0,
+                       local_attn_sigma: float = 0.0,
+                       seq_tfmr_sigma: float = 0.0):
     """Canonical ScoreNetwork config: 256-dim IPA transformer + 128-dim edges.
 
     Args:
@@ -37,6 +39,12 @@ def default_model_conf(use_temporal_embedding: bool = False,
             inside the Embedder (adds 32-dim temporal gap embedding to ϕ(t)).
         lora_r: LoRA rank.  0 = disabled (full fine-tuning).
         lora_alpha: LoRA scaling factor.  Defaults to 2*lora_r when 0.
+        local_attn_sigma: IPA spatial attention cutoff in Ångströms.  Attention
+            falls to ~2% at this distance (100% near 0, ~37% at cutoff/2).
+            0.0 = disabled (global attention).  Typical: 12–20 Å.
+        seq_tfmr_sigma: Sequence transformer attention cutoff in residues.
+            Attention falls to ~2% at this sequence separation.
+            0.0 = disabled (global attention).  Typical: 16–32.
     """
     from omegaconf import OmegaConf
     _r = max(lora_r, 1)  # avoid div-by-zero in alpha default; enabled flag gates usage
@@ -48,7 +56,9 @@ def default_model_conf(use_temporal_embedding: bool = False,
         'ipa': {'c_s': 256, 'c_z': 128, 'c_hidden': 16, 'no_heads': 12,
                 'no_qk_points': 4, 'no_v_points': 8, 'c_skip': 64,
                 'num_blocks': 4,
-                'seq_tfmr_num_heads': 4, 'seq_tfmr_num_layers': 2},
+                'seq_tfmr_num_heads': 4, 'seq_tfmr_num_layers': 2,
+                'local_attn_sigma': local_attn_sigma,
+                'seq_tfmr_sigma': seq_tfmr_sigma},
         'lora': {
             'enabled': lora_r > 0,
             'r': _r,
