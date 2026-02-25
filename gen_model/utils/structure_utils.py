@@ -125,6 +125,10 @@ def _build_pdb_string(ca_traj: np.ndarray, seqres: str) -> str:
                 f'{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           C\n'
             )
         buf.write('ENDMDL\n')
+    # CONECT records explicitly define backbone connectivity so that py3Dmol's
+    # cartoon renderer can draw the chain even with CA-only atoms.
+    for i in range(N - 1):
+        buf.write(f'CONECT{i + 1:5d}{i + 2:5d}\n')
     buf.write('END\n')
     return buf.getvalue()
 
