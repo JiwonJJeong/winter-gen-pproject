@@ -142,19 +142,21 @@ class SE3BaseModule(L.LightningModule):
     def training_step(self, batch, batch_idx):
         batch = self._prepare_batch(batch)
         loss, rot_loss, trans_loss, psi_loss = self._compute_loss(batch)
-        self.log('train_loss',       loss,       on_step=True,  on_epoch=True,  prog_bar=True)
-        self.log('train_rot_loss',   rot_loss,   on_step=False, on_epoch=True)
-        self.log('train_trans_loss', trans_loss, on_step=False, on_epoch=True)
-        self.log('train_psi_loss',   psi_loss,   on_step=False, on_epoch=True)
+        bs = batch['res_mask'].shape[0]
+        self.log('train_loss',       loss,       on_step=True,  on_epoch=True,  prog_bar=True, batch_size=bs)
+        self.log('train_rot_loss',   rot_loss,   on_step=False, on_epoch=True,                 batch_size=bs)
+        self.log('train_trans_loss', trans_loss, on_step=False, on_epoch=True,                 batch_size=bs)
+        self.log('train_psi_loss',   psi_loss,   on_step=False, on_epoch=True,                 batch_size=bs)
         return loss
 
     def validation_step(self, batch, batch_idx):
         batch = self._prepare_batch(batch)
         loss, rot_loss, trans_loss, psi_loss = self._compute_loss(batch)
-        self.log('val_loss',         loss,       on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_rot_loss',     rot_loss,   on_step=False, on_epoch=True)
-        self.log('val_trans_loss',   trans_loss, on_step=False, on_epoch=True)
-        self.log('val_psi_loss',     psi_loss,   on_step=False, on_epoch=True)
+        bs = batch['res_mask'].shape[0]
+        self.log('val_loss',         loss,       on_step=False, on_epoch=True, prog_bar=True, batch_size=bs)
+        self.log('val_rot_loss',     rot_loss,   on_step=False, on_epoch=True,                batch_size=bs)
+        self.log('val_trans_loss',   trans_loss, on_step=False, on_epoch=True,                batch_size=bs)
+        self.log('val_psi_loss',     psi_loss,   on_step=False, on_epoch=True,                batch_size=bs)
         return loss
 
     def configure_optimizers(self):
