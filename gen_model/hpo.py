@@ -46,20 +46,13 @@ from torch.utils.data import DataLoader
 def _suggest_hparams(trial: optuna.Trial) -> dict:
     """Sample all hyperparameters for one Optuna trial."""
     lora_r = trial.suggest_categorical('lora_r', [0, 4, 8, 16])
-    lora_alpha = (
-        trial.suggest_float('lora_alpha_ratio', 0.5, 4.0) * lora_r
-        if lora_r > 0 else 0.0
-    )
     return {
         'lr':                 trial.suggest_float('lr', 1e-5, 1e-3, log=True),
         'lora_r':             lora_r,
-        'lora_alpha':         lora_alpha,
+        'lora_alpha':         float(2 * lora_r),   # fixed at 2×r (standard init)
         'rot_loss_weight':    trial.suggest_float('rot_loss_weight',    0.5, 2.0),
         'trans_loss_weight':  trial.suggest_float('trans_loss_weight',  0.5, 2.0),
         'psi_loss_weight':    trial.suggest_float('psi_loss_weight',    0.1, 1.0),
-        # Schedule curvature: only the shape is searched; boundaries are fixed.
-        'so3_schedule_gamma': trial.suggest_float('so3_schedule_gamma', 0.3, 3.0, log=True),
-        'r3_schedule_gamma':  trial.suggest_float('r3_schedule_gamma',  0.3, 3.0, log=True),
     }
 
 
@@ -68,7 +61,9 @@ def _suggest_hparams(trial: optuna.Trial) -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_se3_conf(hp: dict):
-    """Build SE3Diffuser config with trial-suggested curvature, fixed boundaries."""
+    """Build SE3Diffuser config.  Schedule curvature is fixed at 1.0 (default).
+    Boundary values are physically motivated and kept fixed across all trials.
+    """
     from omegaconf import OmegaConf
     return OmegaConf.create({
         'diffuse_rot': True, 'diffuse_trans': True,
@@ -77,11 +72,11 @@ def _build_se3_conf(hp: dict):
             'min_sigma': 0.1, 'max_sigma': 1.5,
             'num_sigma': 1000, 'use_cached_score': False,
             'cache_dir': '/tmp/igso3_cache', 'num_omega': 1000,
-            'schedule_gamma': hp['so3_schedule_gamma'],
+            'schedule_gamma': 1.0,
         },
         'r3': {
             'min_b': 0.1, 'max_b': 20.0,
-            'schedule_gamma': hp['r3_schedule_gamma'],
+            'schedule_gamma': 1.0,
         },
     })
 
@@ -162,6 +157,8 @@ def make_objective(args):
             filename='best', monitor='val_loss', save_top_k=1, mode='min',
         )
 
+        _nw = 2   # parallel data-loading workers; reduces GPU idle time
+        _pm = torch.cuda.is_available()
         trainer = L.Trainer(
             max_epochs=args.epochs_per_trial,
             accelerator='auto', devices='auto',
@@ -169,15 +166,18 @@ def make_objective(args):
             precision='16-mixed' if torch.cuda.is_available() else 32,
             enable_progress_bar=False,
             logger=False,
+            limit_val_batches=0.5,   # HPO needs relative ordering, not exact val_loss
         )
 
         try:
             trainer.fit(
                 pl_module,
                 train_dataloaders=DataLoader(
-                    train_ds, batch_size=args.batch_size, shuffle=True),
+                    train_ds, batch_size=args.batch_size, shuffle=True,
+                    num_workers=_nw, pin_memory=_pm, persistent_workers=_nw > 0),
                 val_dataloaders=DataLoader(
-                    val_ds, batch_size=args.batch_size, shuffle=False),
+                    val_ds, batch_size=args.batch_size, shuffle=False,
+                    num_workers=_nw, pin_memory=_pm, persistent_workers=_nw > 0),
             )
         except optuna.exceptions.TrialPruned:
             raise  # propagate so Optuna records the pruned state
