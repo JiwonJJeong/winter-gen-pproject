@@ -71,14 +71,17 @@ def run_reverse_sde(
         ).unsqueeze(0).to(device)                                   # [1, N, 7]
 
         input_feats = {
-            'rigids_t':   rigids_t_b,
-            'sc_ca_t':    sc_ca_t_b,
-            'res_mask':   res_mask_b,
-            'fixed_mask': fixed_mask,
-            't':          t_tensor,
-            'aatype':     aatype_b,
-            'seq_idx':    seq_idx_b,
-            'chain_idx':  chain_idx_b,
+            'rigids_t':               rigids_t_b,
+            'sc_ca_t':                sc_ca_t_b,
+            'res_mask':               res_mask_b,
+            'fixed_mask':             fixed_mask,
+            't':                      t_tensor,
+            'aatype':                 aatype_b,
+            'seq_idx':                seq_idx_b,
+            'chain_idx':              chain_idx_b,
+            # gt_psi is multiplied by 0 during inference (fixed_mask=0 → diff_mask=1)
+            # so zeros are fine; the key must exist to avoid a KeyError in score_network.
+            'torsion_angles_sin_cos': torch.zeros(1, N, 7, 2, device=device),
         }
 
         pred = model.model(input_feats)
@@ -145,14 +148,17 @@ def run_sdedit_step(
         ).unsqueeze(0).to(device)                                    # [1, N, 7]
 
         input_feats = {
-            'rigids_t':   rigids_t_b,
-            'sc_ca_t':    sc_ca_t_b,
-            'res_mask':   res_mask_b,
-            'fixed_mask': fixed_mask,
-            't':          t_tensor,
-            'aatype':     aatype_b,
-            'seq_idx':    seq_idx_b,
-            'chain_idx':  chain_idx_b,
+            'rigids_t':               rigids_t_b,
+            'sc_ca_t':                sc_ca_t_b,
+            'res_mask':               res_mask_b,
+            'fixed_mask':             fixed_mask,
+            't':                      t_tensor,
+            'aatype':                 aatype_b,
+            'seq_idx':                seq_idx_b,
+            'chain_idx':              chain_idx_b,
+            # gt_psi is multiplied by 0 during inference (fixed_mask=0 → diff_mask=1)
+            # so zeros are fine; the key must exist to avoid a KeyError in score_network.
+            'torsion_angles_sin_cos': torch.zeros(1, N, 7, 2, device=device),
         }
 
         pred = model.model(input_feats)
