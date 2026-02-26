@@ -116,6 +116,11 @@ def _build_pdb_string(ca_traj: np.ndarray, seqres: str) -> str:
     T, N, _ = ca_traj.shape
     res3_list = [restype_1to3.get(aa, 'GLY') for aa in seqres]
     buf = io.StringIO()
+    # Build CONECT block once (same serial numbers for every frame).
+    # Must be inside each MODEL block so addModelsAsFrames picks them up.
+    conect_lines = ''.join(
+        f'CONECT{i + 1:5d}{i + 2:5d}\n' for i in range(N - 1)
+    )
     for t in range(T):
         buf.write(f'MODEL     {t + 1:4d}\n')
         for i in range(N):
@@ -124,11 +129,8 @@ def _build_pdb_string(ca_traj: np.ndarray, seqres: str) -> str:
                 f'ATOM  {i + 1:5d}  CA  {res3_list[i]:3s} A{i + 1:4d}    '
                 f'{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           C\n'
             )
+        buf.write(conect_lines)
         buf.write('ENDMDL\n')
-    # CONECT records explicitly define backbone connectivity so that py3Dmol's
-    # cartoon renderer can draw the chain even with CA-only atoms.
-    for i in range(N - 1):
-        buf.write(f'CONECT{i + 1:5d}{i + 2:5d}\n')
     buf.write('END\n')
     return buf.getvalue()
 
