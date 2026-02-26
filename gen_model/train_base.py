@@ -15,14 +15,20 @@ import lightning as L
 # Shared default configurations
 # ---------------------------------------------------------------------------
 
-def default_se3_conf():
-    """Canonical SE(3) diffusion config: logarithmic SO3 schedule + R3 VP-SDE."""
+def default_se3_conf(cache_dir: str = '/tmp/igso3_cache'):
+    """Canonical SE(3) diffusion config: logarithmic SO3 schedule + R3 VP-SDE.
+
+    Args:
+        cache_dir: Directory for the IGSO3 lookup-table cache.  Defaults to
+            /tmp/igso3_cache (ephemeral).  Pass a Google Drive path to persist
+            the cache across Colab sessions and avoid recomputing (~10 min).
+    """
     from omegaconf import OmegaConf
     return OmegaConf.create({
         'diffuse_rot': True, 'diffuse_trans': True,
         'so3': {'schedule': 'logarithmic', 'min_sigma': 0.1, 'max_sigma': 1.5,
                 'num_sigma': 1000, 'use_cached_score': False,
-                'cache_dir': '/tmp/igso3_cache', 'num_omega': 1000,
+                'cache_dir': cache_dir, 'num_omega': 1000,
                 'schedule_gamma': 1.0},
         'r3':  {'min_b': 0.1, 'max_b': 20.0, 'schedule_gamma': 1.0},
     })

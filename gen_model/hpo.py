@@ -60,9 +60,13 @@ def _suggest_hparams(trial: optuna.Trial) -> dict:
 # Config builders
 # ---------------------------------------------------------------------------
 
-def _build_se3_conf(hp: dict):
+def _build_se3_conf(hp: dict, cache_dir: str = '/tmp/igso3_cache'):
     """Build SE3Diffuser config.  Schedule curvature is fixed at 1.0 (default).
     Boundary values are physically motivated and kept fixed across all trials.
+
+    Args:
+        cache_dir: IGSO3 lookup-table cache directory.  Pass a Drive path to
+            persist the cache across Colab sessions (~10 min first-time cost).
     """
     from omegaconf import OmegaConf
     return OmegaConf.create({
@@ -71,7 +75,7 @@ def _build_se3_conf(hp: dict):
             'schedule': 'logarithmic',
             'min_sigma': 0.1, 'max_sigma': 1.5,
             'num_sigma': 1000, 'use_cached_score': False,
-            'cache_dir': '/tmp/igso3_cache', 'num_omega': 1000,
+            'cache_dir': cache_dir, 'num_omega': 1000,
             'schedule_gamma': 1.0,
         },
         'r3': {
@@ -136,7 +140,7 @@ def make_objective(args):
         from gen_model.diffusion.se3_diffuser import SE3Diffuser
 
         hp         = _suggest_hparams(trial)
-        se3_conf   = _build_se3_conf(hp)
+        se3_conf   = _build_se3_conf(hp, cache_dir=args.igso3_cache_dir)
         model_conf = default_model_conf(
             use_temporal_embedding=(args.mode == 'conditional'),
             lora_r=hp['lora_r'],
@@ -247,6 +251,9 @@ def main():
                         help='IPA spatial attention cutoff in Å (~2%% at this distance). 0=global.')
     parser.add_argument('--seq_tfmr_sigma',       type=float, default=20.0,
                         help='Seq-transformer attention cutoff in residues. 0=global.')
+    parser.add_argument('--igso3_cache_dir',      type=str,   default='/tmp/igso3_cache',
+                        help='Directory for the IGSO3 SO3 lookup-table cache.  Pass a Drive path '
+                             'to persist across Colab sessions (~10 min first-time cost).')
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
 
