@@ -141,6 +141,8 @@ def make_objective(args):
             use_temporal_embedding=(args.mode == 'conditional'),
             lora_r=hp['lora_r'],
             lora_alpha=hp['lora_alpha'],
+            local_attn_sigma=args.local_attn_sigma,
+            seq_tfmr_sigma=args.seq_tfmr_sigma,
         )
         data_args = default_data_args(args)
         diffuser  = SE3Diffuser(se3_conf)
@@ -240,6 +242,11 @@ def main():
                         help='ASHA: minimum epochs before a trial can be pruned')
     parser.add_argument('--asha_reduction_factor',type=int,   default=3,
                         help='ASHA: keep top 1/reduction_factor trials at each rung')
+    # Attention cutoffs — keep consistent with full training so HPO results transfer.
+    parser.add_argument('--local_attn_sigma',     type=float, default=15.0,
+                        help='IPA spatial attention cutoff in Å (~2%% at this distance). 0=global.')
+    parser.add_argument('--seq_tfmr_sigma',       type=float, default=20.0,
+                        help='Seq-transformer attention cutoff in residues. 0=global.')
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
 

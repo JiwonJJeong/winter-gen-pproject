@@ -388,7 +388,9 @@ def show_py3dmol_trajectory(
 
     view = py3Dmol.view(width=width, height=height)
     view.addModelsAsFrames(pdb_str, 'pdb')
-    view.setStyle({}, {'cartoon': {'color': color, 'thickness': radius}})
+    # stick uses the CONECT records to draw cylinders between consecutive CAs.
+    # This is reliable for CA-only PDBs; cartoon requires N/CA/C atoms.
+    view.setStyle({}, {'stick': {'radius': 0.15, 'color': color}})
     if sphere_radius > 0:
         view.addStyle({}, {'sphere': {'color': _sc, 'radius': sphere_radius}})
     view.zoomTo()
@@ -450,7 +452,7 @@ def show_py3dmol_overlay(
         pdb_str = _build_pdb_string(frame0, seqres)
         _sc = _SPHERE_DEFAULTS.get(color, color)
         view.addModel(pdb_str, 'pdb')
-        view.setStyle({'model': idx}, {'cartoon': {'color': color, 'thickness': radius}})
+        view.setStyle({'model': idx}, {'stick': {'radius': 0.15, 'color': color}})
         view.addStyle({'model': idx}, {'sphere': {'color': _sc, 'radius': radius}})
     view.zoomTo()
     return view
