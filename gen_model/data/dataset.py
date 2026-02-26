@@ -475,11 +475,11 @@ class ConditionalMDGenDataset(MDGenDataset):
         t = float(output['t'])
         diff_feats = self._apply_diffusion(target_rigids, t, mask_np)
 
-        # 6. Centre target translations with the SOURCE centroid.
+        # 6. Centre and scale target_r0 with SOURCE centroid (for consistency with
+        #    unconditional rigids_0).  rigids_t is left in Å — identical to the
+        #    unconditional parent — so that trans_score (also in Å) stays consistent
+        #    with the IPA's coordinate frame and the loss comparison is valid.
         centroid = output['centroid']  # [1, 3]
-        diff_feats['rigids_t'][..., 4:] = (
-            diff_feats['rigids_t'][..., 4:] - centroid) * self.coord_scale
-
         target_r0 = target_rigids.to_tensor_7()
         target_r0[..., 4:] = (target_r0[..., 4:] - centroid) * self.coord_scale
 
