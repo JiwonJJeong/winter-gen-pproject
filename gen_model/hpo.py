@@ -44,12 +44,16 @@ from torch.utils.data import DataLoader
 # ---------------------------------------------------------------------------
 
 def _suggest_hparams(trial: optuna.Trial) -> dict:
-    """Sample all hyperparameters for one Optuna trial."""
-    lora_r = trial.suggest_categorical('lora_r', [0, 4, 8, 16])
+    """Sample all hyperparameters for one Optuna trial.
+
+    lora_r is fixed to 0 (full fine-tuning): HPO data showed r=0 consistently
+    outperforms all LoRA ranks (r=4/8/16) on short 5-epoch trials, so searching
+    over LoRA ranks wastes budget without improving signal.
+    """
     return {
         'lr':                 trial.suggest_float('lr', 1e-5, 1e-3, log=True),
-        'lora_r':             lora_r,
-        'lora_alpha':         float(2 * lora_r),   # fixed at 2×r (standard init)
+        'lora_r':             0,
+        'lora_alpha':         0.0,
         'rot_loss_weight':    trial.suggest_float('rot_loss_weight',    0.5, 2.0),
         'trans_loss_weight':  trial.suggest_float('trans_loss_weight',  0.5, 2.0),
         'psi_loss_weight':    trial.suggest_float('psi_loss_weight',    0.1, 1.0),
