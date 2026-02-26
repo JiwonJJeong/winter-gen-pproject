@@ -73,6 +73,7 @@ class MDGenDataset(torch.utils.data.Dataset):
         self.stride = stride
         
         self.balanced_weights = {}
+        self._arr_cache: dict = {}   # path → np.ndarray; avoids repeated Drive reads
         self._build_frame_index()
         
         # Calculate or load coordination scale factor
@@ -101,7 +102,7 @@ class MDGenDataset(torch.utils.data.Dataset):
             folder_name = name.split('_R')[0]
             npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
             
-            arr = np.lib.format.open_memmap(npy_path, 'r')
+            arr = self._load_npy(npy_path)
             if self.args.frame_interval:
                 # Simplified sampling logic for scale computation
                 frame_data = arr[frame_start * self.args.frame_interval]
@@ -119,6 +120,18 @@ class MDGenDataset(torch.utils.data.Dataset):
         all_ca = np.concatenate(ca_coords, axis=0) # [N_sampled * L, 3]
         std = np.std(all_ca)
         return float(1.0 / (std + 1e-8))
+
+    def _load_npy(self, npy_path: str) -> np.ndarray:
+        """Load a .npy trajectory array, caching it in memory to avoid Drive FUSE errors.
+
+        Google Drive FUSE mounts can drop their connection between dataset
+        iterations, causing open_memmap to fail with OSError 107 (Transport
+        endpoint not connected).  Loading the whole array once and caching it
+        in a dict removes the live file-handle dependency after the first read.
+        """
+        if npy_path not in self._arr_cache:
+            self._arr_cache[npy_path] = np.load(npy_path)
+        return self._arr_cache[npy_path]
 
     def _add_frames_for_split(self, protein_idx, s, e):
         """Add valid source-frame starts for split segment [s, e).
@@ -167,7 +180,7 @@ class MDGenDataset(torch.utils.data.Dataset):
             npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
 
             try:
-                arr = np.lib.format.open_memmap(npy_path, 'r')
+                arr = self._load_npy(npy_path)
                 num_frames = arr.shape[0]
 
                 masking_enabled = self.mode not in ['val', 'test'] and getattr(self.args, 'crop_ratio', 0.95) < 1.0
@@ -257,8 +270,8 @@ class MDGenDataset(torch.utils.data.Dataset):
             raise KeyError(f"Protein {folder_name} not found in sequence mapping!")
 
         npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
-        arr = np.lib.format.open_memmap(npy_path, 'r')
-        if self.args.frame_interval: 
+        arr = self._load_npy(npy_path)
+        if self.args.frame_interval:
             arr = arr[::self.args.frame_interval]
 
         # 2. Extract Strided Frames (use first frame for single-frame training)
@@ -452,7 +465,7 @@ class ConditionalMDGenDataset(MDGenDataset):
         seqres = self.seq_map[folder_name]
 
         npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
-        arr = np.lib.format.open_memmap(npy_path, 'r')
+        arr = self._load_npy(npy_path)
         if self.args.frame_interval:
             arr = arr[::self.args.frame_interval]
 
