@@ -50,7 +50,12 @@ def _suggest_hparams(trial: optuna.Trial) -> dict:
     so equal weighting is principled; psi is an auxiliary signal so 0.5.
     """
     return {
-        'lr':                   trial.suggest_float('lr', 1e-5, 1e-3, log=True),
+        # lr is intentionally NOT searched here — the LR finder in the final
+        # training cell finds the optimal rate for the full model.  Searching
+        # lr with only 5-epoch trials introduces a short-horizon bias that
+        # systematically favours conservative rates that are too slow for the
+        # full 100-epoch run.  3e-4 is a reasonable default for HPO trials.
+        'lr':                   3e-4,
         'seq_tfmr_num_layers':  trial.suggest_int('seq_tfmr_num_layers', 1, 2),
         'lora_r':               0,
         'lora_alpha':           0.0,
