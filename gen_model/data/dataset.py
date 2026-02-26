@@ -83,7 +83,8 @@ class MDGenDataset(torch.utils.data.Dataset):
             else:
                 self.coord_scale = 0.1
 
-        print(f"Dataset {mode} mode: coord_scale = {self.coord_scale:.4f}")
+        if self.mode in ['train', 'train_early']:
+            print(f"Dataset {mode} mode: coord_scale = {self.coord_scale:.4f}")
 
     def _compute_coord_scale(self):
         """Computes global scale factor from sampled training data."""

@@ -1,12 +1,8 @@
 """Optuna hyperparameter optimisation for SE(3) diffusion training.
 
 Searches over:
-  - lr                 : learning rate (log-uniform)
-  - lora_r             : LoRA rank (0 = full fine-tuning)
-  - lora_alpha_ratio   : alpha = ratio × r (only when lora_r > 0)
-  - rot/trans/psi loss weights
-  - so3_schedule_gamma : curvature of SO3 noise schedule (t → t^γ)
-  - r3_schedule_gamma  : curvature of R3  noise schedule (t → t^γ)
+  - lr                   : learning rate (log-uniform)
+  - seq_tfmr_num_layers  : transformer layers per IPA block (int 1–4)
 
 Boundary values (min_sigma, max_sigma, min_b, max_b) are kept fixed at their
 physically motivated defaults.  Only the *shape* of the schedule is searched.
@@ -47,16 +43,20 @@ def _suggest_hparams(trial: optuna.Trial) -> dict:
     """Sample all hyperparameters for one Optuna trial.
 
     lora_r is fixed to 0 (full fine-tuning): HPO data showed r=0 consistently
-    outperforms all LoRA ranks (r=4/8/16) on short 5-epoch trials, so searching
-    over LoRA ranks wastes budget without improving signal.
+    outperforms all LoRA ranks (r=4/8/16) on short 5-epoch trials.
+
+    Loss weights are fixed at physically motivated defaults (1/1/0.5): rotation
+    and translation scores are already normalised by their score_scaling factors
+    so equal weighting is principled; psi is an auxiliary signal so 0.5.
     """
     return {
-        'lr':                 trial.suggest_float('lr', 1e-5, 1e-3, log=True),
-        'lora_r':             0,
-        'lora_alpha':         0.0,
-        'rot_loss_weight':    trial.suggest_float('rot_loss_weight',    0.5, 2.0),
-        'trans_loss_weight':  trial.suggest_float('trans_loss_weight',  0.5, 2.0),
-        'psi_loss_weight':    trial.suggest_float('psi_loss_weight',    0.1, 1.0),
+        'lr':                   trial.suggest_float('lr', 1e-5, 1e-3, log=True),
+        'seq_tfmr_num_layers':  trial.suggest_int('seq_tfmr_num_layers', 1, 2),
+        'lora_r':               0,
+        'lora_alpha':           0.0,
+        'rot_loss_weight':      1.0,
+        'trans_loss_weight':    1.0,
+        'psi_loss_weight':      0.5,
     }
 
 
@@ -151,6 +151,7 @@ def make_objective(args):
             lora_alpha=hp['lora_alpha'],
             local_attn_sigma=args.local_attn_sigma,
             seq_tfmr_sigma=args.seq_tfmr_sigma,
+            seq_tfmr_num_layers=hp['seq_tfmr_num_layers'],
         )
         data_args = default_data_args(args)
         diffuser  = SE3Diffuser(se3_conf)

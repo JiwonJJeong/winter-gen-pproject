@@ -37,7 +37,8 @@ def default_se3_conf(cache_dir: str = '/tmp/igso3_cache'):
 def default_model_conf(use_temporal_embedding: bool = False,
                        lora_r: int = 0, lora_alpha: float = 0.0,
                        local_attn_sigma: float = 0.0,
-                       seq_tfmr_sigma: float = 0.0):
+                       seq_tfmr_sigma: float = 0.0,
+                       seq_tfmr_num_layers: int = 2):
     """Canonical ScoreNetwork config: 256-dim IPA transformer + 128-dim edges.
 
     Args:
@@ -51,6 +52,8 @@ def default_model_conf(use_temporal_embedding: bool = False,
         seq_tfmr_sigma: Sequence transformer attention cutoff in residues.
             Attention falls to ~2% at this sequence separation.
             0.0 = disabled (global attention).  Typical: 16–32.
+        seq_tfmr_num_layers: Number of transformer layers inside each IPA block.
+            Searched during HPO (range 1–4).  Default 2 matches the paper.
     """
     from omegaconf import OmegaConf
     _r = max(lora_r, 1)  # avoid div-by-zero in alpha default; enabled flag gates usage
@@ -62,7 +65,7 @@ def default_model_conf(use_temporal_embedding: bool = False,
         'ipa': {'c_s': 256, 'c_z': 128, 'c_hidden': 16, 'no_heads': 12,
                 'no_qk_points': 4, 'no_v_points': 8, 'c_skip': 64,
                 'num_blocks': 4,
-                'seq_tfmr_num_heads': 4, 'seq_tfmr_num_layers': 2,
+                'seq_tfmr_num_heads': 4, 'seq_tfmr_num_layers': seq_tfmr_num_layers,
                 'local_attn_sigma': local_attn_sigma,
                 'seq_tfmr_sigma': seq_tfmr_sigma},
         'lora': {

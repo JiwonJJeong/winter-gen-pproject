@@ -170,12 +170,12 @@ class SO3Diffuser:
         score_norms_cache = os.path.join(cache_dir, 'score_norms.npy')
 
         if os.path.exists(pdf_cache) and os.path.exists(cdf_cache) and os.path.exists(score_norms_cache):
-            self._log.info(f'Using cached IGSO3 in {cache_dir}')
+            print(f'IGSO3: loading from cache {cache_dir}')
             self._pdf = np.load(pdf_cache)
             self._cdf = np.load(cdf_cache)
             self._score_norms = np.load(score_norms_cache)
         else:
-            self._log.info(f'Computing IGSO3. Saving in {cache_dir}')
+            print(f'IGSO3: cache not found — computing and saving to {cache_dir} (~10 min)')
             # compute the expansion of the power series
             exp_vals = np.asarray(
                 [igso3_expansion(self.discrete_omega, sigma) for sigma in self.discrete_sigma])
