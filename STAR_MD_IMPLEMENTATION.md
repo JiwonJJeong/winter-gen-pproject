@@ -466,7 +466,7 @@ KV caching is optional for correctness but important for scaling beyond ~20 fram
 
 1. ~~`rope2d.py`~~ — already done
 2. ~~`AdaLN` in `modules.py`~~ — self-contained ✅ Done
-3. `star_attention.py` using `RoPE2D` and `AdaLN`
+3. ~~`star_attention.py` using `RoPE2D` and `AdaLN`~~ ✅ Done
 4. Wire `SpatioTemporalAttention` into `IpaScore` behind `star.enabled` flag; update signature to accept `frame_idx` and `cond`; add `star` sub-config to `default_model_conf`; extend LoRA `target_modules`
 5. Update `ScoreNetwork.forward()`: build `cond` vector from `t` and `delta_t`; call `Embedder` per-frame for multi-frame inputs; pass `frame_idx` and `cond` to `IpaScore`
 6. Update `SE3BaseModule._compute_loss` to index target frame when batch has L dimension
