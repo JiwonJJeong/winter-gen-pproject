@@ -38,7 +38,9 @@ def default_model_conf(use_temporal_embedding: bool = False,
                        lora_r: int = 0, lora_alpha: float = 0.0,
                        local_attn_sigma: float = 0.0,
                        seq_tfmr_sigma: float = 0.0,
-                       seq_tfmr_num_layers: int = 2):
+                       seq_tfmr_num_layers: int = 2,
+                       star_enabled: bool = False,
+                       st_num_heads: int = 4):
     """Canonical ScoreNetwork config: 256-dim IPA transformer + 128-dim edges.
 
     Args:
@@ -68,6 +70,11 @@ def default_model_conf(use_temporal_embedding: bool = False,
                 'seq_tfmr_num_heads': 4, 'seq_tfmr_num_layers': seq_tfmr_num_layers,
                 'local_attn_sigma': local_attn_sigma,
                 'seq_tfmr_sigma': seq_tfmr_sigma},
+        'star': {
+            'enabled': star_enabled,
+            'st_num_heads': st_num_heads,
+            'causal': True,
+        },
         'lora': {
             'enabled': lora_r > 0,
             'r': _r,
@@ -75,9 +82,11 @@ def default_model_conf(use_temporal_embedding: bool = False,
             # IPA attention Q/K/V/O + MLP layers in StructureModuleTransition,
             # TorsionAngles, and ScoreLayer.  Geometric projections (linear_q_points,
             # linear_kv_points, linear_b, down_z) and tiny output heads are excluded.
+            # SpatioTemporalAttention projections added for STAR-MD.
             'target_modules': [
                 'linear_q', 'linear_kv', 'linear_out',
                 'linear_1', 'linear_2',
+                'q_proj', 'k_proj', 'v_proj', 'out_proj',
             ],
         },
     })

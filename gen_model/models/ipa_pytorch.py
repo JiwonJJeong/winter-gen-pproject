@@ -9,6 +9,7 @@ import torch.nn as nn
 from typing import Optional, Callable, List, Sequence
 from gen_model.utils.rigid_utils import Rigid
 from gen_model.data import all_atom
+from gen_model.models.star_attention import SpatioTemporalAttention
 
 
 def permute_final_dims(tensor: torch.Tensor, inds: List[int]):
@@ -606,13 +607,50 @@ class IpaScore(nn.Module):
                     edge_embed_out=self._model_conf.edge_embed_size,
                 )
 
+            star_conf = getattr(model_conf, 'star', None)
+            if star_conf is not None and star_conf.enabled:
+                cond_dim = 2 * model_conf.embed.index_embed_size  # 2*32 = 64
+                self.trunk[f'st_attn_{b}'] = SpatioTemporalAttention(
+                    c_s=ipa_conf.c_s,
+                    num_heads=star_conf.st_num_heads,
+                    cond_dim=cond_dim,
+                    causal=star_conf.causal,
+                )
+
         self.torsion_pred = TorsionAngles(ipa_conf.c_s, 1)
 
-    def forward(self, init_node_embed, edge_embed, input_feats):
-        node_mask = input_feats['res_mask'].type(torch.float32)
-        diffuse_mask = (1 - input_feats['fixed_mask'].type(torch.float32)) * node_mask
+    def forward(self, init_node_embed, edge_embed, input_feats,
+                frame_idx=None, cond=None):
+        # ── Multi-frame detection ──────────────────────────────────────────
+        # rigids_t is [B, L, N, 7] for multi-frame, [B, N, 7] for single-frame.
+        input_rigids_raw = input_feats['rigids_t']
+        multi_frame = input_rigids_raw.ndim == 4
+        if multi_frame:
+            B, L, N = input_rigids_raw.shape[:3]
+            def flat(x):
+                return x.reshape(B * L, *x.shape[2:])
+            def unflat(x):
+                return x.reshape(B, L, *x.shape[1:])
+            # Flatten all per-frame tensors to [B*L, ...]
+            init_node_embed = flat(init_node_embed)   # [B*L, N, c_s]
+            edge_embed      = flat(edge_embed)        # [B*L, N, N, c_z]
+            # res_mask / fixed_mask are [B, N] (same crop for all frames)
+            _res_mask   = input_feats['res_mask'].float()[:, None, :].expand(B, L, N)
+            _fixed_mask = input_feats['fixed_mask'].float()[:, None, :].expand(B, L, N)
+            node_mask   = flat(_res_mask)             # [B*L, N]
+            fixed_mask_flat = flat(_fixed_mask)       # [B*L, N]
+            rigids_t_flat   = flat(input_rigids_raw)  # [B*L, N, 7]
+            # t is [B]; broadcast to all L frames → [B*L]
+            t_flat = input_feats['t'].unsqueeze(1).expand(B, L).reshape(B * L)
+        else:
+            node_mask = input_feats['res_mask'].type(torch.float32)
+            fixed_mask_flat = input_feats['fixed_mask'].type(torch.float32)
+            rigids_t_flat   = input_feats['rigids_t'].type(torch.float32)
+            t_flat = input_feats['t']
+
+        diffuse_mask = (1 - fixed_mask_flat) * node_mask
         edge_mask = node_mask[..., None] * node_mask[..., None, :]
-        init_frames = input_feats['rigids_t'].type(torch.float32)
+        init_frames = rigids_t_flat.type(torch.float32)
 
         curr_rigids = Rigid.from_tensor_7(torch.clone(init_frames))
         init_rigids = Rigid.from_tensor_7(init_frames)
@@ -668,6 +706,19 @@ class IpaScore(nn.Module):
             node_embed = node_embed + self.trunk[f'post_tfmr_{b}'](seq_tfmr_out)
             node_embed = self.trunk[f'node_transition_{b}'](node_embed)
             node_embed = node_embed * node_mask[..., None]
+
+            # Cross-frame attention after node transition, before backbone update.
+            if multi_frame and f'st_attn_{b}' in self.trunk:
+                cond_dim = self.trunk[f'st_attn_{b}'].adaln.gamma_mlp[0].in_features
+                st_cond = cond if cond is not None else torch.zeros(
+                    B, cond_dim, device=node_embed.device, dtype=node_embed.dtype)
+                st_mask = unflat(node_mask)              # [B, L, N]
+                nef     = unflat(node_embed)             # [B, L, N, c_s]
+                delta   = self.trunk[f'st_attn_{b}'](
+                    nef, frame_idx, input_feats['seq_idx'], st_mask, st_cond)
+                node_embed = flat(nef + delta)           # residual add → [B*L, N, c_s]
+                node_embed = node_embed * node_mask[..., None]
+
             rigid_update = self.trunk[f'bb_update_{b}'](
                 node_embed * diffuse_mask[..., None])
             curr_rigids = curr_rigids.compose_q_update_vec(
@@ -677,21 +728,30 @@ class IpaScore(nn.Module):
                 edge_embed = self.trunk[f'edge_transition_{b}'](
                     node_embed, edge_embed)
                 edge_embed *= edge_mask[..., None]
+
         rot_score = self.diffuser.calc_rot_score(
             init_rigids.get_rots(),
             curr_rigids.get_rots(),
-            input_feats['t']
+            t_flat,
         )
         rot_score = rot_score * node_mask[..., None]
 
         trans_score = self.diffuser.calc_trans_score(
             init_rigids.get_trans(),
             curr_rigids.get_trans(),
-            input_feats['t'][:, None, None],
+            t_flat[:, None, None],
             use_torch=True,
         )
         trans_score = trans_score * node_mask[..., None]
         _, psi_pred = self.torsion_pred(node_embed)
+
+        if multi_frame:
+            rot_score   = unflat(rot_score)    # [B, L, N, 3]
+            trans_score = unflat(trans_score)  # [B, L, N, 3]
+            psi_pred    = unflat(psi_pred)     # [B, L, N, 2]
+            curr_rigids = Rigid.from_tensor_7(
+                unflat(curr_rigids.to_tensor_7()))  # [B, L, N]
+
         model_out = {
             'psi': psi_pred,
             'rot_score': rot_score,
