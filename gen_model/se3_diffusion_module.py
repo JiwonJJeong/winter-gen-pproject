@@ -46,10 +46,12 @@ class SE3Diffusion(L.LightningModule):
     SE3 forward marginal (analog of q_sample), model forward, and loss.
 
     Args:
-        model:        ScoreNetwork (or StarIpaScore wrapper).
+        model:        ScoreNetwork (or StarScoreNetwork).
         diffuser:     SE3Diffuser instance.
         lr:           Initial learning rate.
         min_t:        Minimum diffusion time (avoids t≈0 instability).
+        max_t:        Maximum diffusion time.  Set to ~0.1 for Diffusion
+                      Forcing (STAR-MD multi-frame); 1.0 for unconditional.
         rot_weight:   Rotation score loss weight.
         trans_weight: Translation score loss weight.
         psi_weight:   Torsion angle loss weight.
@@ -62,6 +64,7 @@ class SE3Diffusion(L.LightningModule):
         diffuser,
         lr: float = 1e-4,
         min_t: float = 0.01,
+        max_t: float = 1.0,
         rot_weight: float = 1.0,
         trans_weight: float = 1.0,
         psi_weight: float = 1.0,
@@ -72,6 +75,7 @@ class SE3Diffusion(L.LightningModule):
         self.diffuser = diffuser
         self.lr = lr
         self.min_t = min_t
+        self.max_t = max_t
         self.rot_weight = rot_weight
         self.trans_weight = trans_weight
         self.psi_weight = psi_weight
@@ -85,9 +89,14 @@ class SE3Diffusion(L.LightningModule):
     def _apply_se3_noise(self, batch, t_batch: np.ndarray) -> dict:
         """Apply SE3 forward marginal per sample and inject diffusion features into batch.
 
+        Handles both single-frame and multi-frame batches:
+          - Single-frame: rigids_0 [B, N, 7]
+          - Multi-frame:  rigids_0 [B, L, N, 7] — same t applied to all L frames
+            per batch item (Diffusion Forcing: all frames share one noise level).
+
         Args:
-            batch:   dict with rigids_0 [B, N, 7], res_mask [B, N]
-            t_batch: [B] numpy array of diffusion times in [min_t, 1.0]
+            batch:   dict with rigids_0 [B, N, 7] or [B, L, N, 7], res_mask [B, N]
+            t_batch: [B] numpy array of diffusion times
 
         Returns:
             batch updated in-place with:
@@ -95,30 +104,62 @@ class SE3Diffusion(L.LightningModule):
                 rot_score_scaling, trans_score_scaling, t
         """
         B = batch['rigids_0'].shape[0]
-        rigids_t_list, rot_scores, trans_scores = [], [], []
-        rot_scalings, trans_scalings = [], []
-
-        for i in range(B):
-            rigids_0_i = Rigid.from_tensor_7(batch['rigids_0'][i].float())
-            mask_i = batch['res_mask'][i].cpu().numpy()
-            t_i = float(t_batch[i])
-
-            diff = self.diffuser.forward_marginal(
-                rigids_0=rigids_0_i, t=t_i, diffuse_mask=mask_i, as_tensor_7=True)
-
-            rigids_t_list.append(_to_tensor(diff['rigids_t']))
-            rot_scores.append(_to_tensor(diff['rot_score']))
-            trans_scores.append(_to_tensor(diff['trans_score']))
-            rot_scalings.append(float(diff['rot_score_scaling']))
-            trans_scalings.append(float(diff['trans_score_scaling']))
-
+        multi_frame = batch['rigids_0'].ndim == 4
         device = batch['rigids_0'].device
-        batch['rigids_t']           = torch.stack(rigids_t_list).to(device)
-        batch['rot_score']          = torch.stack(rot_scores).to(device)
-        batch['trans_score']        = torch.stack(trans_scores).to(device)
-        batch['rot_score_scaling']  = torch.tensor(rot_scalings,  dtype=torch.float32, device=device)
-        batch['trans_score_scaling']= torch.tensor(trans_scalings, dtype=torch.float32, device=device)
-        batch['t']                  = torch.tensor(t_batch, dtype=torch.float32, device=device)
+
+        if multi_frame:
+            L = batch['rigids_0'].shape[1]
+            all_rigids_t, all_rot_scores, all_trans_scores = [], [], []
+            rot_scalings, trans_scalings = [], []
+
+            for i in range(B):
+                t_i = float(t_batch[i])
+                mask_i = batch['res_mask'][i].cpu().numpy()
+                frame_rigids_t, frame_rot, frame_trans = [], [], []
+                for l in range(L):
+                    rigids_0_il = Rigid.from_tensor_7(batch['rigids_0'][i, l].float())
+                    diff = self.diffuser.forward_marginal(
+                        rigids_0=rigids_0_il, t=t_i,
+                        diffuse_mask=mask_i, as_tensor_7=True)
+                    frame_rigids_t.append(_to_tensor(diff['rigids_t']))
+                    frame_rot.append(_to_tensor(diff['rot_score']))
+                    frame_trans.append(_to_tensor(diff['trans_score']))
+                # Same scaling for all L frames (same t)
+                rot_scalings.append(float(diff['rot_score_scaling']))
+                trans_scalings.append(float(diff['trans_score_scaling']))
+                all_rigids_t.append(torch.stack(frame_rigids_t))    # [L, N, 7]
+                all_rot_scores.append(torch.stack(frame_rot))        # [L, N, 3]
+                all_trans_scores.append(torch.stack(frame_trans))    # [L, N, 3]
+
+            batch['rigids_t']            = torch.stack(all_rigids_t).to(device)     # [B,L,N,7]
+            batch['rot_score']           = torch.stack(all_rot_scores).to(device)   # [B,L,N,3]
+            batch['trans_score']         = torch.stack(all_trans_scores).to(device) # [B,L,N,3]
+            batch['rot_score_scaling']   = torch.tensor(rot_scalings,  dtype=torch.float32, device=device)
+            batch['trans_score_scaling'] = torch.tensor(trans_scalings, dtype=torch.float32, device=device)
+            batch['t']                   = torch.tensor(t_batch, dtype=torch.float32, device=device)
+        else:
+            rigids_t_list, rot_scores, trans_scores = [], [], []
+            rot_scalings, trans_scalings = [], []
+
+            for i in range(B):
+                rigids_0_i = Rigid.from_tensor_7(batch['rigids_0'][i].float())
+                mask_i = batch['res_mask'][i].cpu().numpy()
+                t_i = float(t_batch[i])
+                diff = self.diffuser.forward_marginal(
+                    rigids_0=rigids_0_i, t=t_i, diffuse_mask=mask_i, as_tensor_7=True)
+                rigids_t_list.append(_to_tensor(diff['rigids_t']))
+                rot_scores.append(_to_tensor(diff['rot_score']))
+                trans_scores.append(_to_tensor(diff['trans_score']))
+                rot_scalings.append(float(diff['rot_score_scaling']))
+                trans_scalings.append(float(diff['trans_score_scaling']))
+
+            batch['rigids_t']            = torch.stack(rigids_t_list).to(device)
+            batch['rot_score']           = torch.stack(rot_scores).to(device)
+            batch['trans_score']         = torch.stack(trans_scores).to(device)
+            batch['rot_score_scaling']   = torch.tensor(rot_scalings,  dtype=torch.float32, device=device)
+            batch['trans_score_scaling'] = torch.tensor(trans_scalings, dtype=torch.float32, device=device)
+            batch['t']                   = torch.tensor(t_batch, dtype=torch.float32, device=device)
+
         return batch
 
     # ------------------------------------------------------------------
@@ -128,31 +169,45 @@ class SE3Diffusion(L.LightningModule):
     def _score_loss(self, pred: dict, batch: dict, mask: torch.Tensor):
         """Scale-normalised MSE over rotation score, translation score, and psi.
 
+        Handles both single-frame [B, N, 3] and multi-frame [B, L, N, 3] scores.
+        For multi-frame batches, mask [B, N] is expanded to [B, L, N] so all L
+        frames contribute equally to the loss (Diffusion Forcing).
+
         Returns:
             (total, rot_loss, trans_loss, psi_loss)
         """
-        rot_scaling   = batch['rot_score_scaling'].float()[:, None, None]   + 1e-8
-        trans_scaling = batch['trans_score_scaling'].float()[:, None, None] + 1e-8
+        multi_frame = pred['rot_score'].ndim == 4  # [B, L, N, 3]
+
+        if multi_frame:
+            L = pred['rot_score'].shape[1]
+            rot_scaling   = batch['rot_score_scaling'].float()[:, None, None, None] + 1e-8
+            trans_scaling = batch['trans_score_scaling'].float()[:, None, None, None] + 1e-8
+            # Expand res_mask [B, N] → [B, L, N]
+            mask_exp = mask[:, None, :].expand(-1, L, -1)
+        else:
+            rot_scaling   = batch['rot_score_scaling'].float()[:, None, None] + 1e-8
+            trans_scaling = batch['trans_score_scaling'].float()[:, None, None] + 1e-8
+            mask_exp = mask
 
         rot_mse = F.mse_loss(
-            pred['rot_score']   / rot_scaling,
-            batch['rot_score'].float()   / rot_scaling,
+            pred['rot_score']          / rot_scaling,
+            batch['rot_score'].float() / rot_scaling,
             reduction='none',
-        ).sum(dim=-1)   # [B, N]
+        ).sum(dim=-1)   # [B, N] or [B, L, N]
 
         trans_mse = F.mse_loss(
-            pred['trans_score'] / trans_scaling,
+            pred['trans_score']          / trans_scaling,
             batch['trans_score'].float() / trans_scaling,
             reduction='none',
-        ).sum(dim=-1)   # [B, N]
+        ).sum(dim=-1)   # [B, N] or [B, L, N]
 
-        n_visible = mask.sum() + 1e-8
-        rot_loss   = (rot_mse   * mask).sum() / n_visible
-        trans_loss = (trans_mse * mask).sum() / n_visible
+        n_visible  = mask_exp.sum() + 1e-8
+        rot_loss   = (rot_mse   * mask_exp).sum() / n_visible
+        trans_loss = (trans_mse * mask_exp).sum() / n_visible
 
-        gt_psi   = batch['torsion_angles_sin_cos'][..., 2, :].float()  # [B, N, 2]
-        psi_mse  = F.mse_loss(pred['psi'], gt_psi, reduction='none').sum(dim=-1)
-        psi_loss = (psi_mse * mask).sum() / n_visible
+        gt_psi  = batch['torsion_angles_sin_cos'][..., 2, :].float()  # [B,N,2] or [B,L,N,2]
+        psi_mse = F.mse_loss(pred['psi'], gt_psi, reduction='none').sum(dim=-1)
+        psi_loss = (psi_mse * mask_exp).sum() / n_visible
 
         total = (self.rot_weight   * rot_loss
                + self.trans_weight * trans_loss
@@ -175,7 +230,7 @@ class SE3Diffusion(L.LightningModule):
         B = batch['rigids_0'].shape[0]
 
         # 1. Sample t per sample (SinFusion: t = randint(0, T))
-        t_batch = np.random.uniform(self.min_t, 1.0, size=B)
+        t_batch = np.random.uniform(self.min_t, self.max_t, size=B)
 
         # 2. SE3 forward marginal (SinFusion: x_noisy = q_sample(x_clean, t))
         batch = self._apply_se3_noise(batch, t_batch)
