@@ -375,98 +375,128 @@ class MDGenDataset(torch.utils.data.Dataset):
 
 
 class ConditionalMDGenDataset(MDGenDataset):
-    """Conditional SE(3) diffusion dataset with curriculum temporal gap.
+    """STAR-MD L-frame window dataset (Diffusion Forcing training scheme).
 
-    Each sample pairs a clean SOURCE frame with a noised TARGET frame that is
-    k raw-trajectory strides away (k can be negative = going backward in time).
+    Each sample is a window of L consecutive MD frames at a common noise level
+    τ ~ U[0, max_t] (applied in the Lightning module's forward(), not here).
+    All L frames are denoising targets simultaneously; the block-causal mask in
+    SpatioTemporalAttention provides the causal structure at training time.
 
-    The model receives:
-      - sc_ca_t : CA positions of the clean source frame (centred + scaled)
-      - rigids_t / rot_score / trans_score : noised TARGET frame at diffusion time t
-      - k : signed integer stride count, added to input_feats for ϕ(k) embedding
+    Physical time stride (delta_t) is sampled from LogUniform[0.01, 10] ns;
+    the raw-frame stride k is derived from it and clamped to what the trajectory
+    can support for L frames.  Frame direction is ±1 with equal probability
+    (data augmentation); the window is sorted ascending before output.
 
-    Curriculum learning (from the paper):
-      - current_max_k starts at 1 (k ∈ {-1, +1})
-      - grows up to max_k (default 3) as training progresses
-      - updated externally by TemporalCurriculumCallback in train_conditional.py
-
-    Frame index is built once for the full ±max_k range; curriculum only
-    restricts which k values are drawn at sample time.
+    Returns (per sample, collated to [B, L, ...] by default PyTorch collation):
+        rigids_0                [L, N, 7]    clean backbone frames
+        torsion_angles_sin_cos  [L, N, 7, 2] torsion angles for all frames
+        sc_ca_t                 [L, N, 3]    per-frame self-conditioning CA:
+                                             sc_ca_t[0]=0, sc_ca_t[l]=CA of frame l-1
+        frame_idx               [L]          absolute frame positions (for RoPE2D)
+        delta_t                 scalar       actual physical stride in ns
+        res_mask                [N]          spatial crop mask (same for all frames)
+        aatype / seq_idx / fixed_mask / chain_idx  [N] or scalar
     """
 
-    def __init__(self, *args, max_k: int = 3, current_max_k: int = 1, **kwargs):
-        if max_k < 1:
-            raise ValueError("ConditionalMDGenDataset requires max_k >= 1")
-        if not (1 <= current_max_k <= max_k):
-            raise ValueError(f"current_max_k must be in [1, {max_k}]")
-        self._max_k = max_k
-        self.current_max_k = current_max_k
-        kwargs['num_consecutive'] = 1  # source frame only; k-offset handled below
+    def __init__(self, *args, num_frames: int = 16,
+                 ns_per_stored_frame: float = 0.1, **kwargs):
+        self._num_frames = num_frames
+        self._ns_per_stored = ns_per_stored_frame
+        kwargs['num_consecutive'] = 1  # anchor frame only; window built in __getitem__
         super().__init__(*args, **kwargs)
 
     # ------------------------------------------------------------------
-    # Only need to override the frame-validity rule; everything else in
-    # _build_frame_index is inherited unchanged from MDGenDataset.
+    # Frame validity: anchor must have (L-1) frames on both sides at k=1
+    # so any sampled window direction is feasible.
     # ------------------------------------------------------------------
     def _add_frames_for_split(self, protein_idx, s, e):
-        """Bidirectional: source must have max_k*stride frames on BOTH sides."""
-        required_half = self._max_k * self.stride
-        min_start = s + required_half
-        max_start = e - required_half - 1
+        half = self._num_frames - 1   # minimum frames required on each side
+        min_start = s + half
+        max_start = e - half - 1
         if max_start >= min_start:
-            for frame_idx in range(min_start, max_start + 1):
-                self.frame_index.append((protein_idx, frame_idx))
+            for fi in range(min_start, max_start + 1):
+                self.frame_index.append((protein_idx, fi))
 
     # ------------------------------------------------------------------
     # __getitem__
     # ------------------------------------------------------------------
     def __getitem__(self, idx):
-        # 1. Source frame via parent (single frame; frame_idx=0).
-        #    output['atom14_pos'] and output['centroid'] are centred+scaled.
-        output = super().__getitem__(idx)
+        # 1. Anchor frame via parent — gives us centroid, res_mask, coord_scale.
+        anchor = super().__getitem__(idx)
 
-        # 2. Sample k from curriculum range (excluding 0 — source ≠ target).
-        k_vals = (list(range(-self.current_max_k, 0))
-                  + list(range(1, self.current_max_k + 1)))
-        k = int(np.random.choice(k_vals))
-
-        # 3. Load target frame (k strides away from source).
         protein_idx, frame_start = self.frame_index[idx]
-        name = self.df.index[protein_idx]
+        name        = self.df.index[protein_idx]
         folder_name = name.split('_R')[0]
-        seqres = self.seq_map[folder_name]
+        seqres      = self.seq_map[folder_name]
 
         npy_path = f'{self.args.data_dir}/{folder_name}/{name}{self.args.suffix}.npy'
         arr = self._load_npy(npy_path)
         if self.args.frame_interval:
             arr = arr[::self.args.frame_interval]
+        total_frames = arr.shape[0]
+        L = self._num_frames
 
-        target_abs_idx = frame_start + k * self.stride
-        target_atom14 = np.copy(arr[target_abs_idx]).astype(np.float32)[None]  # [1, L, 14, 3]
+        # 2. Sample physical stride and derive raw-frame stride k (Decision 4B).
+        delta_t_ns   = float(np.exp(np.random.uniform(np.log(0.01), np.log(10.0))))
+        k_raw        = max(1, int(round(delta_t_ns / self._ns_per_stored)))
+        max_k_avail  = max(1, (total_frames - 1) // (L - 1))
+        k            = min(k_raw, max_k_avail)
+        delta_t_act  = k * self._ns_per_stored   # quantised to stored-frame grid
 
-        # 4. Compute geometry for target frame.
+        # 3. Sample direction and build sorted window indices (Decision 3B).
+        direction   = int(np.random.choice([-1, 1]))
+        raw_indices = [frame_start + direction * i * k for i in range(L)]
+        raw_indices = [max(0, min(total_frames - 1, fi)) for fi in raw_indices]
+        frame_idx_arr = np.array(sorted(raw_indices), dtype=np.int64)   # [L]
+
+        # 4. Load all L frames and compute geometry.
+        frames_data = np.copy(arr[frame_idx_arr]).astype(np.float32)    # [L, N, 14, 3]
+        N_res       = frames_data.shape[1]
+
         aatype_np = np.array([restype_order[c] for c in seqres])
-        aatype_1 = torch.from_numpy(aatype_np)[None]  # [1, L]
-        frames   = atom14_to_frames(torch.from_numpy(target_atom14))
-        atom37   = torch.from_numpy(atom14_to_atom37(target_atom14, aatype_1)).float()
-        torsions, _ = atom37_to_torsions(atom37, aatype_1)
+        aatype_L  = torch.from_numpy(aatype_np)[None].expand(L, -1)     # [L, N]
 
-        target_rigids = Rigid(
-            rots=Rotation(rot_mats=frames._rots._rot_mats[0]),
-            trans=frames._trans[0],
-        )
+        frames_rigid = atom14_to_frames(torch.from_numpy(frames_data))
+        atom37_L     = torch.from_numpy(
+            atom14_to_atom37(frames_data, aatype_L)).float()             # [L, N, 37, 3]
+        torsions_L, _ = atom37_to_torsions(atom37_L, aatype_L)          # [L, N, 7, 2]
 
-        # 5. Centre target_r0 with SOURCE centroid for consistency.
-        #    Diffusion noise is applied in forward() (SinFusion pattern).
-        centroid = output['centroid']
-        target_r0 = target_rigids.to_tensor_7()
-        target_r0[..., 4:] = (target_r0[..., 4:] - centroid) * self.coord_scale
+        # 5. Build rigids_0 for all L frames and apply centering + scaling.
+        centroid    = anchor['centroid']     # [1, 3]
+        scale       = self.coord_scale
+        rigids_0_frames = []
+        for l in range(L):
+            r = Rigid(
+                rots=Rotation(rot_mats=frames_rigid._rots._rot_mats[l]),
+                trans=frames_rigid._trans[l],
+            )
+            r7 = r.to_tensor_7()
+            r7[..., 4:] = (r7[..., 4:] - centroid) * scale
+            rigids_0_frames.append(r7)
+        rigids_0 = torch.stack(rigids_0_frames, dim=0)  # [L, N, 7]
 
-        # 6. Patch output: target geometry → rigids_0 / torsions; sc_ca_t → source CA.
-        output.update({
-            'rigids_0':               target_r0,
-            'torsion_angles_sin_cos': torsions[0],
-            'sc_ca_t':                output['atom14_pos'][:, 1, :],  # source CA [N, 3]
-            'k':                      torch.tensor(k, dtype=torch.long),
-        })
-        return output
+        # 6. Per-frame self-conditioning CA.
+        #    sc_ca_t[0] = zeros (no prior context); sc_ca_t[l] = CA of frame l-1.
+        ca_all  = atom37_L[:, :, 1, :].clone()                          # [L, N, 3]
+        ca_all  = (ca_all - centroid.unsqueeze(0)) * scale
+        sc_ca_t = torch.zeros(L, N_res, 3)
+        sc_ca_t[1:] = ca_all[:-1]
+
+        return {
+            'aatype':                   anchor['aatype'],
+            'seq_idx':                  anchor['seq_idx'],
+            'chain_idx':                anchor['chain_idx'],
+            'res_mask':                 anchor['res_mask'],
+            'fixed_mask':               anchor['fixed_mask'],
+            # L-frame geometry (noise applied in Lightning module's forward())
+            'rigids_0':                 rigids_0,                        # [L, N, 7]
+            'torsion_angles_sin_cos':   torsions_L,                      # [L, N, 7, 2]
+            'sc_ca_t':                  sc_ca_t,                         # [L, N, 3]
+            # Temporal metadata for STAR-MD
+            'frame_idx':                torch.tensor(frame_idx_arr, dtype=torch.long),  # [L]
+            'delta_t':                  torch.tensor(delta_t_act, dtype=torch.float32),
+            # Normalization metadata
+            'centroid':                 centroid,
+            'coord_scale':              anchor['coord_scale'],
+            'name':                     anchor['name'],
+        }
