@@ -31,7 +31,7 @@ except ImportError:
     data_transforms = None
 
 class MDGenDataset(torch.utils.data.Dataset):
-    def __init__(self, args, diffuser=None, split=None, mode='train', repeat=1, num_consecutive=1, stride=1):
+    def __init__(self, args, split=None, mode='train', repeat=1, num_consecutive=1, stride=1):
         """
         Args:
             args: Global config object.
@@ -45,7 +45,6 @@ class MDGenDataset(torch.utils.data.Dataset):
         super().__init__()
         self.args = _plain_args(args)
         self.mode = mode
-        self._diffuser = diffuser
         self._is_training = mode in ['train', 'train_early']
         
         # Determine split file if not provided
@@ -145,19 +144,6 @@ class MDGenDataset(torch.utils.data.Dataset):
             for frame_idx in range(s, max_start + 1):
                 self.frame_index.append((protein_idx, frame_idx))
 
-    def _apply_diffusion(self, clean_rigids, t, mask):
-        """Apply SE(3) forward diffusion, or return zero-noise features when no diffuser."""
-        L = mask.shape[0]
-        if self._diffuser is not None:
-            return self._diffuser.forward_marginal(
-                rigids_0=clean_rigids, t=t, diffuse_mask=mask)
-        return {
-            'rigids_t':            clean_rigids.to_tensor_7(),
-            'rot_score':           torch.zeros(L, 3),
-            'trans_score':         torch.zeros(L, 3),
-            'rot_score_scaling':   torch.tensor(1.0),
-            'trans_score_scaling': torch.tensor(1.0),
-        }
 
     def _build_frame_index(self):
         self.frame_index = []
@@ -309,21 +295,13 @@ class MDGenDataset(torch.utils.data.Dataset):
             spatial_mask[keep_indices] = 1.0
             mask = mask * spatial_mask.numpy()
 
-        # 5. Convert to Rigid format for SE3 diffusion
+        # 5. Convert to Rigid format and serialise as tensor_7 for batching
         clean_rigids = Rigid(
             rots=Rotation(rot_mats=frames._rots._rot_mats[frame_idx]),
             trans=frames._trans[frame_idx]
         )
-        
-        # 6. Sample diffusion time and apply SE(3) forward process.
-        if self._diffuser is not None:
-            t = (np.random.uniform(getattr(self.args, 'min_t', 0.01), 1.0)
-                 if self._is_training else 1.0)
-        else:
-            t = 0.0
-        diff_feats = self._apply_diffusion(clean_rigids, t, mask)
-        
-        # 7. Prepare atom representations using openfold transforms if available
+
+        # 6. Prepare atom representations using openfold transforms if available
         aatype_tensor = aatype[frame_idx]
         atom14_pos = torch.from_numpy(clean_frames[frame_idx]).float()
         
@@ -345,34 +323,30 @@ class MDGenDataset(torch.utils.data.Dataset):
             atom37_mask = torch.from_numpy(RESTYPE_ATOM37_MASK[aatype_tensor.numpy()])
             residx_atom14_to_atom37 = torch.zeros(L, 14, dtype=torch.long)
         
-        # 8. Build final feature dictionary for SE3 diffusion model
+        # 7. Build feature dictionary — clean geometry only.
+        #    Diffusion noise (rigids_t, rot_score, trans_score, t) is applied
+        #    in the Lightning module's forward() following the SinFusion pattern.
         output = {
             # Core identifiers
             'aatype': aatype_tensor,
             'seq_idx': torch.arange(1, L + 1),  # 1-indexed
-            'chain_idx': torch.ones(L),  # Single chain
+            'chain_idx': torch.ones(L),
             'res_mask': torch.from_numpy(mask).float(),
-            'fixed_mask': torch.zeros(L),  # No motifs (all residues diffused)
-            
-            # Ground truth structure (t=0)
+            'fixed_mask': torch.zeros(L),
+
+            # Clean structure (t=0) — noise applied in forward()
             'rigids_0': clean_rigids.to_tensor_7(),
             'atom37_pos': atom37[frame_idx],
             'atom14_pos': atom14_pos,
             'torsion_angles_sin_cos': torsions[frame_idx],
-            
-            # Noised structure (at time t) - from diffuser
-            **diff_feats,
-            't': np.float32(t),  # float32 so DataLoader collates to Float32 tensor
-            
-            # Self-conditioning (initially zeros)
+
+            # Self-conditioning placeholder (source CA; overridden in conditional dataset)
             'sc_ca_t': torch.zeros(L, 3),
-            
+
             # Metadata
             'residx_atom14_to_atom37': residx_atom14_to_atom37,
             'atom37_mask': atom37_mask,
             'residue_index': torch.arange(L),
-            
-            # Original custom fields (for tracking/debugging)
             'name': full_name,
             'frame_indices': np.array(indices),
         }
@@ -425,11 +399,9 @@ class ConditionalMDGenDataset(MDGenDataset):
             raise ValueError("ConditionalMDGenDataset requires max_k >= 1")
         if not (1 <= current_max_k <= max_k):
             raise ValueError(f"current_max_k must be in [1, {max_k}]")
-        # Set these BEFORE super().__init__ so _build_frame_index can read them.
         self._max_k = max_k
         self.current_max_k = current_max_k
-        # num_consecutive=1: source frame only; we handle the k-offset ourselves.
-        kwargs['num_consecutive'] = 1
+        kwargs['num_consecutive'] = 1  # source frame only; k-offset handled below
         super().__init__(*args, **kwargs)
 
     # ------------------------------------------------------------------
@@ -484,25 +456,17 @@ class ConditionalMDGenDataset(MDGenDataset):
             trans=frames._trans[0],
         )
 
-        # 5. Apply SE(3) diffusion to the target with the same t and mask as source.
-        mask_np = output['res_mask'].numpy()
-        t = float(output['t'])
-        diff_feats = self._apply_diffusion(target_rigids, t, mask_np)
-
-        # 6. Centre and scale target_r0 with SOURCE centroid (for consistency with
-        #    unconditional rigids_0).  rigids_t is left in Å — identical to the
-        #    unconditional parent — so that trans_score (also in Å) stays consistent
-        #    with the IPA's coordinate frame and the loss comparison is valid.
-        centroid = output['centroid']  # [1, 3]
+        # 5. Centre target_r0 with SOURCE centroid for consistency.
+        #    Diffusion noise is applied in forward() (SinFusion pattern).
+        centroid = output['centroid']
         target_r0 = target_rigids.to_tensor_7()
         target_r0[..., 4:] = (target_r0[..., 4:] - centroid) * self.coord_scale
 
-        # 7. Patch output: all diffusion / torsion fields → target; sc_ca_t → source.
+        # 6. Patch output: target geometry → rigids_0 / torsions; sc_ca_t → source CA.
         output.update({
-            **diff_feats,
             'rigids_0':               target_r0,
             'torsion_angles_sin_cos': torsions[0],
-            'sc_ca_t':                output['atom14_pos'][:, 1, :],  # source CA [N,3]
+            'sc_ca_t':                output['atom14_pos'][:, 1, :],  # source CA [N, 3]
             'k':                      torch.tensor(k, dtype=torch.long),
         })
         return output
