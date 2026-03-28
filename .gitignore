@@ -10,3 +10,6 @@ __pycache__/
 lightning_logs/
 
 */todo
+
+# Claude Code local state (personal memory, conversation history)
+.claude/
