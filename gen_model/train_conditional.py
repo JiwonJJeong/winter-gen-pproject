@@ -1,13 +1,12 @@
-"""Conditional SE(3) score-matching diffusion training.
+"""STAR-MD conditional SE(3) diffusion training (Diffusion Forcing).
 
-Follows the SinFusion training pattern (ConditionalDiffusion analog):
-  - ConditionalSE3Diffusion.forward() owns t-sampling, SE3 forward marginal,
-    model, and loss — sc_ca_t (source CA) conditions the model, analogous to
-    SinFusion's CONDITION_IMG; k (temporal stride) analogous to FRAME.
-  - CosineAnnealingLR schedule
-  - max_steps instead of max_epochs
-  - Temporal curriculum via TemporalCurriculumCallback (analogous to SinFusion's
-    frame_diff curriculum in FrameSet)
+Training scheme:
+  - ConditionalMDGenDataset returns L-frame windows; delta_t is sampled from
+    LogUniform[0.01, 10] ns and the frame stride k is derived from it.
+  - All L frames are noised at the same tau ~ U[min_t, max_t] inside
+    ConditionalSE3Diffusion.forward() (SinFusion pattern).
+  - Loss is computed at all L positions simultaneously (Diffusion Forcing).
+  - Block-causal SpatioTemporalAttention provides the causal structure.
 
 Usage:
     python gen_model/train_conditional.py --data_dir data
@@ -23,89 +22,80 @@ from gen_model.train_base import default_se3_conf, default_model_conf, default_d
 from gen_model.se3_diffusion_module import ConditionalSE3Diffusion
 
 
-class TemporalCurriculumCallback(L.Callback):
-    """Increases the temporal-gap curriculum range by 1 every `grow_every` epochs.
-
-    Mirrors SinFusion's FrameSet curriculum: starts at current_max_k=1
-    (k ∈ {-1, +1}) and grows to max_k over training.
-    """
-
-    def __init__(self, train_dataset, val_dataset, max_k: int = 3, grow_every: int = 10):
-        self.train_dataset = train_dataset
-        self.val_dataset   = val_dataset
-        self.max_k         = max_k
-        self.grow_every    = grow_every
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        epoch   = trainer.current_epoch
-        new_k   = min(1 + epoch // self.grow_every, self.max_k)
-        self.train_dataset.current_max_k = new_k
-        self.val_dataset.current_max_k   = new_k
-        pl_module.log('current_max_k', float(new_k), on_epoch=True)
-
-
 def main():
-    parser = argparse.ArgumentParser(description='Conditional SE(3) Diffusion Training')
-    parser.add_argument('--data_dir',    type=str,   default='data')
-    parser.add_argument('--atlas_csv',   type=str,   default='gen_model/splits/atlas.csv')
-    parser.add_argument('--train_split', type=str,   default='gen_model/splits/frame_splits.csv')
-    parser.add_argument('--suffix',      type=str,   default='_latent')
-    parser.add_argument('--batch_size',  type=int,   default=8)
-    parser.add_argument('--max_steps',   type=int,   default=200_000)
-    parser.add_argument('--lr',          type=float, default=1e-4)
-    parser.add_argument('--save_dir',    type=str,   default='checkpoints/conditional')
-    parser.add_argument('--stride',      type=int,   default=1)
-    parser.add_argument('--max_k',       type=int,   default=3)
-    parser.add_argument('--grow_every',  type=int,   default=10)
-    parser.add_argument('--lora_r',      type=int,   default=0)
-    parser.add_argument('--lora_alpha',  type=float, default=0.0)
+    parser = argparse.ArgumentParser(description='STAR-MD Conditional SE(3) Diffusion Training')
+    parser.add_argument('--data_dir',            type=str,   default='data')
+    parser.add_argument('--atlas_csv',           type=str,   default='gen_model/splits/atlas.csv')
+    parser.add_argument('--train_split',         type=str,   default='gen_model/splits/frame_splits.csv')
+    parser.add_argument('--suffix',              type=str,   default='_latent')
+    parser.add_argument('--batch_size',          type=int,   default=8)
+    parser.add_argument('--max_steps',           type=int,   default=200_000)
+    parser.add_argument('--lr',                  type=float, default=1e-4)
+    parser.add_argument('--save_dir',            type=str,   default='checkpoints/conditional')
+    parser.add_argument('--stride',              type=int,   default=1)
+    parser.add_argument('--num_frames',          type=int,   default=16,
+                        help='Window length L (paper: 80; default 16 for limited data)')
+    parser.add_argument('--ns_per_stored_frame', type=float, default=0.1,
+                        help='Physical time between consecutive stored frames in ns')
+    parser.add_argument('--min_t',               type=float, default=0.01,
+                        help='Minimum diffusion time')
+    parser.add_argument('--max_t',               type=float, default=0.1,
+                        help='Maximum diffusion time for Diffusion Forcing (narrow noise)')
+    parser.add_argument('--lora_r',              type=int,   default=0)
+    parser.add_argument('--lora_alpha',          type=float, default=0.0)
+    parser.add_argument('--star_enabled',        action='store_true', default=True,
+                        help='Enable STAR-MD spatio-temporal attention (default: on)')
+    parser.add_argument('--no_star',             dest='star_enabled', action='store_false',
+                        help='Disable STAR-MD spatio-temporal attention')
+    parser.add_argument('--st_num_heads',        type=int,   default=4)
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
 
     from gen_model.diffusion.se3_diffuser import SE3Diffuser
-    from gen_model.models.score_network import ScoreNetwork
+    from gen_model.models.star_score_network import StarScoreNetwork
     from gen_model.models.lora import apply_lora
     from gen_model.data.dataset import ConditionalMDGenDataset
 
     se3_conf   = default_se3_conf()
     model_conf = default_model_conf(
-        use_temporal_embedding=True,
+        use_temporal_embedding=False,   # delta_t handled by AdaLN cond, not Embedder
         lora_r=args.lora_r, lora_alpha=args.lora_alpha,
+        star_enabled=args.star_enabled,
+        st_num_heads=args.st_num_heads,
     )
     data_args  = default_data_args(args)
     diffuser   = SE3Diffuser(se3_conf)
 
-    # Datasets — no diffuser passed: noise applied in ConditionalSE3Diffusion.forward()
     train_dataset = ConditionalMDGenDataset(
         args=data_args, mode='train',
-        stride=args.stride, max_k=args.max_k, current_max_k=1,
+        stride=args.stride,
+        num_frames=args.num_frames,
+        ns_per_stored_frame=args.ns_per_stored_frame,
     )
     val_dataset = ConditionalMDGenDataset(
         args=data_args, mode='val',
-        stride=args.stride, max_k=args.max_k, current_max_k=1,
+        stride=args.stride,
+        num_frames=args.num_frames,
+        ns_per_stored_frame=args.ns_per_stored_frame,
     )
     val_dataset.coord_scale = float(train_dataset.coord_scale)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size, shuffle=False)
 
-    score_network = ScoreNetwork(model_conf, diffuser)
+    score_network = StarScoreNetwork(model_conf, diffuser)
     apply_lora(score_network, model_conf.lora)
 
     module = ConditionalSE3Diffusion(
         model=score_network,
         diffuser=diffuser,
         lr=args.lr,
+        min_t=args.min_t,
+        max_t=args.max_t,
         cosine_T_max=args.max_steps,
     )
 
-    curriculum_cb = TemporalCurriculumCallback(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        max_k=args.max_k,
-        grow_every=args.grow_every,
-    )
     checkpoint_cb = ModelCheckpoint(
         dirpath=args.save_dir,
         filename='cond-{step:06d}-{val_loss:.4f}',
@@ -114,7 +104,7 @@ def main():
     trainer = L.Trainer(
         max_steps=args.max_steps,
         accelerator='auto', devices='auto',
-        callbacks=[curriculum_cb, checkpoint_cb],
+        callbacks=[checkpoint_cb],
         precision='16-mixed' if torch.cuda.is_available() else 32,
         log_every_n_steps=10,
     )

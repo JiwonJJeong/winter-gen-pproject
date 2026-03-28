@@ -37,12 +37,16 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
 
     from gen_model.diffusion.se3_diffuser import SE3Diffuser
-    from gen_model.models.score_network import ScoreNetwork
+    from gen_model.models.star_score_network import StarScoreNetwork
     from gen_model.models.lora import apply_lora
     from gen_model.data.dataset import MDGenDataset
 
     se3_conf   = default_se3_conf()
-    model_conf = default_model_conf(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
+    # star.enabled=False → StarScoreNetwork behaves identically to ScoreNetwork
+    model_conf = default_model_conf(
+        star_enabled=False,
+        lora_r=args.lora_r, lora_alpha=args.lora_alpha,
+    )
     data_args  = default_data_args(args)
     diffuser   = SE3Diffuser(se3_conf)
 
@@ -55,7 +59,7 @@ def main():
     val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size, shuffle=False)
 
     # Build model and wrap in SinFusion-style Lightning module
-    score_network = ScoreNetwork(model_conf, diffuser)
+    score_network = StarScoreNetwork(model_conf, diffuser)
     apply_lora(score_network, model_conf.lora)
 
     module = SE3Diffusion(

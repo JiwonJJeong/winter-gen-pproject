@@ -77,4 +77,8 @@ def default_data_args(args):
         'data_dir': args.data_dir, 'atlas_csv': args.atlas_csv,
         'train_split': args.train_split, 'suffix': args.suffix,
         'frame_interval': None, 'crop_ratio': 0.95, 'min_t': 0.01,
+        # Physical time between consecutive stored frames (ns).
+        # Set via --ns_per_stored_frame; used by ConditionalMDGenDataset to
+        # convert sampled delta_t (ns) to a raw-frame stride k.
+        'ns_per_stored_frame': getattr(args, 'ns_per_stored_frame', 0.1),
     })
