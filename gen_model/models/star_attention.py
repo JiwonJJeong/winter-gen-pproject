@@ -18,9 +18,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from gen_model.models.ipa_pytorch import Linear
+import gen_model.path_setup  # noqa: F401
+from model.ipa_pytorch import Linear
 from gen_model.models.rope2d import RoPE2D
-from gen_model.models.modules import AdaLN
+from gen_model.models.adaln import AdaLN
 
 
 class SpatioTemporalAttention(nn.Module):

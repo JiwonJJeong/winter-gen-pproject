@@ -1,0 +1,9 @@
+[submodule "extern/se3_diffusion"]
+	path = extern/se3_diffusion
+	url = https://github.com/jasonkyuyim/se3_diffusion
+[submodule "extern/mdgen"]
+	path = extern/mdgen
+	url = https://github.com/bjing2016/mdgen
+[submodule "extern/sinfusion"]
+	path = extern/sinfusion
+	url = https://github.com/yanivnik/sinfusion-code
