@@ -33,7 +33,8 @@ def main():
                         help='Protein name to train on (single trajectory, SinFusion-style)')
     parser.add_argument('--replica',     type=str,   default='1',
                         help='Replica suffix (e.g. "1" for _R1); single-trajectory training uses one replica')
-    parser.add_argument('--batch_size',  type=int,   default=8)
+    parser.add_argument('--batch_size',  type=int,   default=1,
+                        help='Batch size (SinFusion default: 1 for single-trajectory training)')
     parser.add_argument('--max_steps',   type=int,   default=200_000,
                         help='Total training steps (SinFusion-style step-based training)')
     parser.add_argument('--lr',          type=float, default=1e-4)
@@ -49,8 +50,8 @@ def main():
                         help='Accumulate gradients over N batches (MDGen-style)')
     parser.add_argument('--num_workers', type=int,   default=4,
                         help='DataLoader workers')
-    parser.add_argument('--virtual_epoch_size', type=int, default=0,
-                        help='Virtual epoch size (SinFusion-style; 0 = use real dataset size)')
+    parser.add_argument('--virtual_epoch_size', type=int, default=5000,
+                        help='Virtual epoch size (SinFusion default: 5000; 0 = use real dataset size)')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)

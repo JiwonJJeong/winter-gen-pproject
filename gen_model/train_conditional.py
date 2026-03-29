@@ -36,7 +36,8 @@ def main():
                         help='Protein name to train on (single trajectory, SinFusion-style)')
     parser.add_argument('--replica',              type=str,   default='1',
                         help='Replica suffix (e.g. "1" for _R1); single-trajectory training uses one replica')
-    parser.add_argument('--batch_size',          type=int,   default=8)
+    parser.add_argument('--batch_size',          type=int,   default=1,
+                        help='Batch size (SinFusion default: 1 for single-trajectory training)')
     parser.add_argument('--max_steps',           type=int,   default=200_000)
     parser.add_argument('--lr',                  type=float, default=1e-4)
     parser.add_argument('--save_dir',            type=str,   default='checkpoints/conditional')
@@ -65,8 +66,8 @@ def main():
                         help='Accumulate gradients over N batches (MDGen-style)')
     parser.add_argument('--num_workers',         type=int,   default=4,
                         help='DataLoader workers')
-    parser.add_argument('--virtual_epoch_size',  type=int,   default=0,
-                        help='Virtual epoch size (SinFusion-style; 0 = use real dataset size)')
+    parser.add_argument('--virtual_epoch_size',  type=int,   default=5000,
+                        help='Virtual epoch size (SinFusion default: 5000; 0 = use real dataset size)')
     # SinFusion curriculum learning for delta_t
     parser.add_argument('--curriculum',          action='store_true', default=True,
                         help='Enable SinFusion-style curriculum for delta_t range')

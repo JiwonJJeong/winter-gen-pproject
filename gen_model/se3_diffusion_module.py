@@ -257,14 +257,26 @@ class SE3Diffusion(L.LightningModule):
 
         SinFusion analogy:
             t        = randint(0, T)
-            x_noisy  = q_sample(x_clean, t)      ← _apply_se3_noise
-            pred     = model(x_noisy, t)
-            loss     = MSE(noise, pred)           ← _score_loss
+            α̂       = uniform(√α̂_{t-1}, √α̂_t)    ← continuous noise level
+            x_noisy  = q_sample(x_clean, α̂)         ← _apply_se3_noise
+            pred     = model(x_noisy, α̂)
+            loss     = MSE(noise, pred)              ← _score_loss
+
+        SE3 diffusion is already continuous in t (unlike DDPM's discrete steps),
+        so we use stratified sampling: divide [min_t, max_t] into B equal strata,
+        sample one t per stratum.  This ensures each batch covers the full noise
+        range without gaps — the SE3 analog of SinFusion's continuous α̂ sampling.
         """
         B = batch['rigids_0'].shape[0]
 
-        # 1. Sample t per sample (SinFusion: t = randint(0, T))
-        t_batch = np.random.uniform(self.min_t, self.max_t, size=B)
+        # 1. Stratified t sampling (SinFusion-style continuous noise coverage).
+        #    Divide [min_t, max_t] into B strata; sample one t per stratum.
+        #    With B=1 this reduces to uniform, but with B>1 it guarantees
+        #    every batch covers the full noise range.
+        strata = np.linspace(self.min_t, self.max_t, B + 1)
+        t_batch = np.array([
+            np.random.uniform(strata[i], strata[i + 1]) for i in range(B)
+        ])
 
         # 2. SE3 forward marginal (SinFusion: x_noisy = q_sample(x_clean, t))
         batch = self._apply_se3_noise(batch, t_batch)
