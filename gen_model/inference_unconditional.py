@@ -1,6 +1,6 @@
 """Unconditional SE(3) inference: generate protein backbone conformations from noise.
 
-Loads a trained SE3Module (unconditional) checkpoint and runs the reverse SE(3) SDE
+Loads a trained SE3Diffusion (unconditional) checkpoint and runs the reverse SE(3) SDE
 from pure noise, producing new backbone conformations sampled from p(x).
 
 The output is a CA-trace saved as a .npy array [num_samples, N, 3] in Angstroms,
@@ -23,7 +23,7 @@ import torch
 from tqdm import tqdm
 
 from gen_model.train_base import default_se3_conf, default_model_conf
-from gen_model.train_unconditional import SE3Module
+from gen_model.se3_diffusion_module import SE3Diffusion
 from gen_model.diffusion.se3_diffuser import SE3Diffuser, _assemble_rigid
 from gen_model.data.residue_constants import restype_order
 from gen_model.inference_conditional import compute_coord_scale
@@ -182,7 +182,7 @@ def run_sdedit_step(
 def main():
     parser = argparse.ArgumentParser(description='Unconditional SE(3) inference — sample from noise')
     parser.add_argument('--checkpoint',   type=str, required=True,
-                        help='Path to SE3Module Lightning checkpoint')
+                        help='Path to SE3Diffusion Lightning checkpoint')
     parser.add_argument('--npy_path',     type=str, required=True,
                         help='Path to trajectory .npy file (used to compute coord_scale)')
     parser.add_argument('--atlas_csv',    type=str, default='gen_model/splits/atlas.csv')
@@ -227,17 +227,25 @@ def main():
     # Load model
     se3_conf   = default_se3_conf()
     model_conf = default_model_conf(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
-    module = SE3Module.load_from_checkpoint(
-        args.checkpoint,
-        model_conf=model_conf,
-        se3_conf=se3_conf,
-        map_location=device,
+    diffuser   = SE3Diffuser(se3_conf)
+
+    from gen_model.models.star_score_network import StarScoreNetwork
+    from gen_model.models.lora import apply_lora
+    score_network = StarScoreNetwork(model_conf, diffuser)
+    apply_lora(score_network, model_conf.lora)
+
+    module = SE3Diffusion(
+        model=score_network,
+        diffuser=diffuser,
     )
+
+    # Load checkpoint weights
+    ckpt  = torch.load(args.checkpoint, map_location='cpu')
+    state = ckpt.get('state_dict', ckpt)
+    module.load_state_dict(state, strict=False)
     module = module.to(device)
     module.eval()
     print(f'Loaded checkpoint: {args.checkpoint}')
-
-    diffuser = SE3Diffuser(se3_conf)
 
     # Generate samples
     all_ca = []

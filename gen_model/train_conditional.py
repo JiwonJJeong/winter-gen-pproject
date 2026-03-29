@@ -8,6 +8,10 @@ Training scheme:
   - Loss is computed at all L positions simultaneously (Diffusion Forcing).
   - Block-causal SpatioTemporalAttention provides the causal structure.
 
+References:
+  - SinFusion: single-trajectory DDPM with step-based training, curriculum learning
+  - MDGen: gradient clipping, EMA, num_workers, accumulate_grad_batches
+
 Usage:
     python gen_model/train_conditional.py --data_dir data
 """
@@ -28,6 +32,10 @@ def main():
     parser.add_argument('--atlas_csv',           type=str,   default='gen_model/splits/atlas.csv')
     parser.add_argument('--train_split',         type=str,   default='gen_model/splits/frame_splits.csv')
     parser.add_argument('--suffix',              type=str,   default='_latent')
+    parser.add_argument('--protein',              type=str,   required=True,
+                        help='Protein name to train on (single trajectory, SinFusion-style)')
+    parser.add_argument('--replica',              type=str,   default='1',
+                        help='Replica suffix (e.g. "1" for _R1); single-trajectory training uses one replica')
     parser.add_argument('--batch_size',          type=int,   default=8)
     parser.add_argument('--max_steps',           type=int,   default=200_000)
     parser.add_argument('--lr',                  type=float, default=1e-4)
@@ -48,6 +56,22 @@ def main():
     parser.add_argument('--no_star',             dest='star_enabled', action='store_false',
                         help='Disable STAR-MD spatio-temporal attention')
     parser.add_argument('--st_num_heads',        type=int,   default=4)
+    # MDGen-inspired options
+    parser.add_argument('--grad_clip',           type=float, default=1.0,
+                        help='Gradient clipping value (MDGen default: 1.0)')
+    parser.add_argument('--ema_decay',           type=float, default=0.999,
+                        help='EMA decay rate (0 = disabled, MDGen default: 0.999)')
+    parser.add_argument('--accumulate_grad',     type=int,   default=1,
+                        help='Accumulate gradients over N batches (MDGen-style)')
+    parser.add_argument('--num_workers',         type=int,   default=4,
+                        help='DataLoader workers')
+    parser.add_argument('--virtual_epoch_size',  type=int,   default=0,
+                        help='Virtual epoch size (SinFusion-style; 0 = use real dataset size)')
+    # SinFusion curriculum learning for delta_t
+    parser.add_argument('--curriculum',          action='store_true', default=True,
+                        help='Enable SinFusion-style curriculum for delta_t range')
+    parser.add_argument('--no_curriculum',       dest='curriculum', action='store_false',
+                        help='Disable curriculum learning')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -72,17 +96,26 @@ def main():
         stride=args.stride,
         num_frames=args.num_frames,
         ns_per_stored_frame=args.ns_per_stored_frame,
+        curriculum=args.curriculum,
+        virtual_epoch_size=args.virtual_epoch_size,
     )
     val_dataset = ConditionalMDGenDataset(
         args=data_args, mode='val',
         stride=args.stride,
         num_frames=args.num_frames,
         ns_per_stored_frame=args.ns_per_stored_frame,
+        curriculum=False,  # no curriculum during validation
     )
     val_dataset.coord_scale = float(train_dataset.coord_scale)
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, pin_memory=True, persistent_workers=args.num_workers > 0,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True, persistent_workers=args.num_workers > 0,
+    )
 
     score_network = StarScoreNetwork(model_conf, diffuser)
     apply_lora(score_network, model_conf.lora)
@@ -94,6 +127,7 @@ def main():
         min_t=args.min_t,
         max_t=args.max_t,
         cosine_T_max=args.max_steps,
+        ema_decay=args.ema_decay,
     )
 
     checkpoint_cb = ModelCheckpoint(
@@ -107,6 +141,8 @@ def main():
         callbacks=[checkpoint_cb],
         precision='16-mixed' if torch.cuda.is_available() else 32,
         log_every_n_steps=10,
+        gradient_clip_val=args.grad_clip,
+        accumulate_grad_batches=args.accumulate_grad,
     )
     trainer.fit(module, train_dataloaders=train_loader, val_dataloaders=val_loader)
 

@@ -31,16 +31,18 @@ except ImportError:
     data_transforms = None
 
 class MDGenDataset(torch.utils.data.Dataset):
-    def __init__(self, args, split=None, mode='train', repeat=1, num_consecutive=1, stride=1):
+    def __init__(self, args, split=None, mode='train', repeat=1, num_consecutive=1, stride=1,
+                 virtual_epoch_size: int = 0):
         """
         Args:
             args: Global config object.
-            diffuser: SE3Diffuser instance for applying diffusion noise.
             split: Path to the split CSV (optional).
             mode: Dataset mode ('train', 'val', 'test', 'train_early', or 'all').
             repeat: Oversampling factor.
             num_consecutive: Number of frames to return (1, 2, 3, etc.).
             stride: Gap between the consecutive frames (e.g., stride 2 picks frame 0, 2, 4).
+            virtual_epoch_size: If > 0, report this as __len__ and sample randomly
+                (SinFusion-style: prevents overfitting on small single-trajectory datasets).
         """
         super().__init__()
         self.args = _plain_args(args)
@@ -70,7 +72,8 @@ class MDGenDataset(torch.utils.data.Dataset):
         self.repeat = repeat
         self.num_consecutive = num_consecutive
         self.stride = stride
-        
+        self._virtual_epoch_size = virtual_epoch_size
+
         self.balanced_weights = {}
         self._arr_cache: dict = {}   # path → np.ndarray; avoids repeated Drive reads
         self._build_frame_index()
@@ -240,9 +243,14 @@ class MDGenDataset(torch.utils.data.Dataset):
         return w.numpy()
     
     def __len__(self):
+        if self._virtual_epoch_size > 0:
+            return self._virtual_epoch_size
         return len(self.frame_index)
 
     def __getitem__(self, idx):
+        # SinFusion-style virtual epoch: sample a random real index
+        if self._virtual_epoch_size > 0:
+            idx = np.random.randint(len(self.frame_index))
         # 1. Resolve Protein and Starting Frame
         protein_idx, frame_start = self.frame_index[idx]
         name = self.df.index[protein_idx]
@@ -399,9 +407,12 @@ class ConditionalMDGenDataset(MDGenDataset):
     """
 
     def __init__(self, *args, num_frames: int = 16,
-                 ns_per_stored_frame: float = 0.1, **kwargs):
+                 ns_per_stored_frame: float = 0.1,
+                 curriculum: bool = False, **kwargs):
         self._num_frames = num_frames
         self._ns_per_stored = ns_per_stored_frame
+        self._curriculum = curriculum
+        self._sample_counter = 0
         kwargs['num_consecutive'] = 1  # anchor frame only; window built in __getitem__
         super().__init__(*args, **kwargs)
 
@@ -437,7 +448,21 @@ class ConditionalMDGenDataset(MDGenDataset):
         L = self._num_frames
 
         # 2. Sample physical stride and derive raw-frame stride k (Decision 4B).
-        delta_t_ns   = float(np.exp(np.random.uniform(np.log(0.01), np.log(10.0))))
+        #    SinFusion curriculum: gradually increase delta_t range during training.
+        #    Phase 1 (<75k samples): delta_t in [0.01, 0.1] ns (adjacent frames)
+        #    Phase 2 (75k-150k):    delta_t in [0.01, 1.0] ns
+        #    Phase 3 (>=150k):      delta_t in [0.01, 10.0] ns (full range)
+        if self._curriculum:
+            self._sample_counter += 1
+            if self._sample_counter < 75_000:
+                max_delta = 0.1
+            elif self._sample_counter < 150_000:
+                max_delta = 1.0
+            else:
+                max_delta = 10.0
+        else:
+            max_delta = 10.0
+        delta_t_ns   = float(np.exp(np.random.uniform(np.log(0.01), np.log(max_delta))))
         k_raw        = max(1, int(round(delta_t_ns / self._ns_per_stored)))
         max_k_avail  = max(1, (total_frames - 1) // (L - 1))
         k            = min(k_raw, max_k_avail)

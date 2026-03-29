@@ -48,6 +48,25 @@ def _to_tensor(x, dtype=torch.float32):
     return torch.tensor(x, dtype=dtype)
 
 
+def compute_coord_scale(npy_path: str, num_samples: int = 500) -> float:
+    """Compute coordinate scale factor (1/std) from a trajectory .npy file.
+
+    Used by both conditional and unconditional inference to match the
+    training-time normalisation.
+    """
+    arr = np.load(npy_path)
+    num_frames = arr.shape[0]
+    sample_idx = np.random.choice(num_frames, min(num_samples, num_frames), replace=False)
+    ca_coords = []
+    for fi in sample_idx:
+        ca = arr[fi, :, 1, :].astype(np.float32)  # atom14 index 1 = CA
+        ca = ca - np.mean(ca, axis=0, keepdims=True)
+        ca_coords.append(ca)
+    all_ca = np.concatenate(ca_coords, axis=0)
+    std = np.std(all_ca)
+    return float(1.0 / (std + 1e-8))
+
+
 def _noise_rigids(rigids7: torch.Tensor, t: float, diffuser, mask_np: np.ndarray) -> torch.Tensor:
     """Apply SE3 forward marginal at level t to a [N, 7] rigid tensor."""
     device = rigids7.device

@@ -13,8 +13,12 @@ SE3 domain adaptations vs SinFusion:
   - Loss: scale-normalised score MSE (rot + trans + psi) replaces pixel MSE
   - Conditioning (conditional model): sc_ca_t (source CA positions) replaces CONDITION_IMG
   - Spatial masking: res_mask applied to loss instead of hard crop
+
+EMA (from MDGen): maintains an exponential moving average of model weights
+for validation and inference (decay=0.999).
 """
 
+import copy
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -33,6 +37,32 @@ def _to_tensor(x, dtype=torch.float32):
     if isinstance(x, torch.Tensor):
         return x.to(dtype)
     return torch.tensor(x, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# EMA (following MDGen's pattern)
+# ---------------------------------------------------------------------------
+
+class EMA:
+    """Exponential Moving Average of model parameters."""
+
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {k: v.clone().detach() for k, v in model.state_dict().items()}
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module):
+        for k, v in model.state_dict().items():
+            self.shadow[k].mul_(self.decay).add_(v, alpha=1.0 - self.decay)
+
+    def apply(self, model: torch.nn.Module):
+        """Swap model weights with EMA weights; returns backup for restore."""
+        backup = {k: v.clone() for k, v in model.state_dict().items()}
+        model.load_state_dict(self.shadow)
+        return backup
+
+    def restore(self, model: torch.nn.Module, backup: dict):
+        model.load_state_dict(backup)
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +86,7 @@ class SE3Diffusion(L.LightningModule):
         trans_weight: Translation score loss weight.
         psi_weight:   Torsion angle loss weight.
         cosine_T_max: CosineAnnealingLR period in steps.
+        ema_decay:    EMA decay rate (0 = disabled, 0.999 = MDGen default).
     """
 
     def __init__(
@@ -69,6 +100,7 @@ class SE3Diffusion(L.LightningModule):
         trans_weight: float = 1.0,
         psi_weight: float = 1.0,
         cosine_T_max: int = 100_000,
+        ema_decay: float = 0.999,
     ):
         super().__init__()
         self.model = model
@@ -81,6 +113,8 @@ class SE3Diffusion(L.LightningModule):
         self.psi_weight = psi_weight
         self.cosine_T_max = cosine_T_max
         self.step_counter = 0  # mirrors SinFusion's step_counter
+        self.ema = EMA(model, decay=ema_decay) if ema_decay > 0 else None
+        self._ema_backup = None
 
     # ------------------------------------------------------------------
     # SE3 forward marginal — analog of SinFusion's q_sample
@@ -258,6 +292,22 @@ class SE3Diffusion(L.LightningModule):
         self._log_losses('train', loss, rot, trans, psi, batch['res_mask'].shape[0])
         self.step_counter += 1
         return loss
+
+    def on_before_optimizer_step(self, optimizer):
+        """Update EMA after each gradient step (MDGen pattern)."""
+        if self.ema is not None:
+            self.ema.update(self.model)
+
+    def on_validation_epoch_start(self):
+        """Swap to EMA weights for validation (MDGen pattern)."""
+        if self.ema is not None:
+            self._ema_backup = self.ema.apply(self.model)
+
+    def on_validation_epoch_end(self):
+        """Restore training weights after validation."""
+        if self.ema is not None and self._ema_backup is not None:
+            self.ema.restore(self.model, self._ema_backup)
+            self._ema_backup = None
 
     def validation_step(self, batch, batch_idx):
         loss, rot, trans, psi = self.forward(batch)

@@ -5,6 +5,10 @@ Follows the SinFusion training pattern:
   - CosineAnnealingLR schedule
   - max_steps instead of max_epochs
 
+References:
+  - SinFusion: single-trajectory DDPM with step-based training, cosine schedule
+  - MDGen: gradient clipping, EMA, num_workers, accumulate_grad_batches
+
 Usage:
     python gen_model/train_unconditional.py --data_dir data
 """
@@ -25,6 +29,10 @@ def main():
     parser.add_argument('--atlas_csv',   type=str,   default='gen_model/splits/atlas.csv')
     parser.add_argument('--train_split', type=str,   default='gen_model/splits/frame_splits.csv')
     parser.add_argument('--suffix',      type=str,   default='_latent')
+    parser.add_argument('--protein',     type=str,   required=True,
+                        help='Protein name to train on (single trajectory, SinFusion-style)')
+    parser.add_argument('--replica',     type=str,   default='1',
+                        help='Replica suffix (e.g. "1" for _R1); single-trajectory training uses one replica')
     parser.add_argument('--batch_size',  type=int,   default=8)
     parser.add_argument('--max_steps',   type=int,   default=200_000,
                         help='Total training steps (SinFusion-style step-based training)')
@@ -32,6 +40,17 @@ def main():
     parser.add_argument('--save_dir',    type=str,   default='checkpoints/unconditional')
     parser.add_argument('--lora_r',      type=int,   default=0)
     parser.add_argument('--lora_alpha',  type=float, default=0.0)
+    # MDGen-inspired options
+    parser.add_argument('--grad_clip',   type=float, default=1.0,
+                        help='Gradient clipping value (MDGen default: 1.0)')
+    parser.add_argument('--ema_decay',   type=float, default=0.999,
+                        help='EMA decay rate (0 = disabled, MDGen default: 0.999)')
+    parser.add_argument('--accumulate_grad', type=int, default=1,
+                        help='Accumulate gradients over N batches (MDGen-style)')
+    parser.add_argument('--num_workers', type=int,   default=4,
+                        help='DataLoader workers')
+    parser.add_argument('--virtual_epoch_size', type=int, default=0,
+                        help='Virtual epoch size (SinFusion-style; 0 = use real dataset size)')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -51,12 +70,21 @@ def main():
     diffuser   = SE3Diffuser(se3_conf)
 
     # Datasets — no diffuser passed: noise is applied in SE3Diffusion.forward()
-    train_dataset = MDGenDataset(args=data_args, mode='train')
-    val_dataset   = MDGenDataset(args=data_args, mode='val')
+    train_dataset = MDGenDataset(
+        args=data_args, mode='train',
+        virtual_epoch_size=args.virtual_epoch_size,
+    )
+    val_dataset = MDGenDataset(args=data_args, mode='val')
     val_dataset.coord_scale = float(train_dataset.coord_scale)
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, pin_memory=True, persistent_workers=args.num_workers > 0,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True, persistent_workers=args.num_workers > 0,
+    )
 
     # Build model and wrap in SinFusion-style Lightning module
     score_network = StarScoreNetwork(model_conf, diffuser)
@@ -67,6 +95,7 @@ def main():
         diffuser=diffuser,
         lr=args.lr,
         cosine_T_max=args.max_steps,
+        ema_decay=args.ema_decay,
     )
 
     checkpoint_cb = ModelCheckpoint(
@@ -80,6 +109,8 @@ def main():
         callbacks=[checkpoint_cb],
         precision='16-mixed' if torch.cuda.is_available() else 32,
         log_every_n_steps=10,
+        gradient_clip_val=args.grad_clip,
+        accumulate_grad_batches=args.accumulate_grad,
     )
     trainer.fit(module, train_dataloaders=train_loader, val_dataloaders=val_loader)
 

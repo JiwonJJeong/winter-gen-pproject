@@ -81,4 +81,8 @@ def default_data_args(args):
         # Set via --ns_per_stored_frame; used by ConditionalMDGenDataset to
         # convert sampled delta_t (ns) to a raw-frame stride k.
         'ns_per_stored_frame': getattr(args, 'ns_per_stored_frame', 0.1),
+        # Single-trajectory filtering (SinFusion-style):
+        # pep_name selects one protein; replica optionally selects one replica.
+        'pep_name': getattr(args, 'protein', None),
+        'replica': getattr(args, 'replica', None),
     })
