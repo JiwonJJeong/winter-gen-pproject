@@ -28,7 +28,8 @@ def default_model_conf(use_temporal_embedding: bool = False,
                        seq_tfmr_sigma: float = 0.0,
                        seq_tfmr_num_layers: int = 2,
                        star_enabled: bool = False,
-                       st_num_heads: int = 8):
+                       st_num_heads: int = 8,
+                       spatial_sigma: float = 0.0):
     """Canonical ScoreNetwork config following STAR-MD paper appendix.
 
     Architecture: 256-dim IPA (8 blocks, 8 heads, 8 qk-points, 12 v-points)
@@ -63,6 +64,7 @@ def default_model_conf(use_temporal_embedding: bool = False,
             'enabled': star_enabled,
             'st_num_heads': st_num_heads,
             'causal': True,
+            'spatial_sigma': spatial_sigma,
         },
         'lora': {
             'enabled': lora_r > 0,

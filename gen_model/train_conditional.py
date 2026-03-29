@@ -58,6 +58,9 @@ def main():
                         help='Disable STAR-MD spatio-temporal attention')
     parser.add_argument('--st_num_heads',        type=int,   default=8,
                         help='ST attention heads (paper: 8)')
+    parser.add_argument('--spatial_sigma',       type=float, default=0.0,
+                        help='Spatial Gaussian sigma for ST attention (Angstroms). '
+                             '0 = global. SinFusion-inspired local receptive field.')
     # MDGen-inspired options
     parser.add_argument('--grad_clip',           type=float, default=1.0,
                         help='Gradient clipping value (MDGen default: 1.0)')
@@ -89,6 +92,7 @@ def main():
         lora_r=args.lora_r, lora_alpha=args.lora_alpha,
         star_enabled=args.star_enabled,
         st_num_heads=args.st_num_heads,
+        spatial_sigma=args.spatial_sigma,
     )
     data_args  = default_data_args(args)
     diffuser   = SE3Diffuser(se3_conf)

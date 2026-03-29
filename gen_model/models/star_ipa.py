@@ -49,6 +49,7 @@ class StarIpaScore(IpaScore):
             ipa_conf = model_conf.ipa
             cond_dim = 2 * model_conf.embed.index_embed_size  # 2*32 = 64
 
+            spatial_sigma = float(getattr(star_conf, 'spatial_sigma', 0.0))
             for b in range(ipa_conf.num_blocks):
                 # Inject ST attention
                 self.trunk[f'st_attn_{b}'] = SpatioTemporalAttention(
@@ -56,6 +57,7 @@ class StarIpaScore(IpaScore):
                     num_heads=star_conf.st_num_heads,
                     cond_dim=cond_dim,
                     causal=star_conf.causal,
+                    spatial_sigma=spatial_sigma,
                 )
                 # Remove upstream SeqTransformer modules (redundant with ST attn)
                 for key in [f'skip_embed_{b}', f'seq_tfmr_{b}',
@@ -177,10 +179,13 @@ class StarIpaScore(IpaScore):
                 st_mask = unflat(node_mask)        # [B, L, N]
                 nef     = unflat(node_embed)       # [B, L, N, c_s]
 
+                # CA positions for spatial Gaussian bias (if spatial_sigma > 0)
+                ca_pos = unflat(curr_rigids.get_trans())  # [B, L, N, 3]
+
                 cache_b = kv_caches[b] if kv_caches is not None else None
                 delta, new_kv_b = self.trunk[f'st_attn_{b}'](
                     nef, frame_idx, input_feats['seq_idx'], st_mask, st_cond,
-                    kv_cache=cache_b)
+                    kv_cache=cache_b, ca_pos=ca_pos)
                 node_embed = flat(nef + delta)     # residual → [B*L, N, c_s]
                 node_embed = node_embed * node_mask[..., None]
 

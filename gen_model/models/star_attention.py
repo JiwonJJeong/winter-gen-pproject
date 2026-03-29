@@ -45,6 +45,7 @@ class SpatioTemporalAttention(nn.Module):
         num_heads: int,
         cond_dim: int = 64,
         causal: bool = True,
+        spatial_sigma: float = 0.0,
     ):
         super().__init__()
         assert c_s % num_heads == 0, (
@@ -60,6 +61,7 @@ class SpatioTemporalAttention(nn.Module):
         self.head_dim = head_dim
         self.scale = head_dim ** -0.5
         self.causal = causal
+        self.spatial_sigma = spatial_sigma
 
         # Input conditioning
         self.adaln = AdaLN(c_s=c_s, cond_dim=cond_dim)
@@ -140,6 +142,7 @@ class SpatioTemporalAttention(nn.Module):
         mask: torch.Tensor,
         cond: torch.Tensor,
         kv_cache: Optional[dict] = None,
+        ca_pos: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Args:
@@ -150,6 +153,11 @@ class SpatioTemporalAttention(nn.Module):
             cond:      [B, cond_dim]    AdaLN conditioning (t_emb || delta_t_emb).
             kv_cache:  Optional dict with 'k', 'v' [B, H, T_cached, D] from
                        previously finalized frames (read-only, not modified).
+            ca_pos:    Optional [B, L, N, 3] CA positions for spatial Gaussian bias.
+                       When spatial_sigma > 0, adds a soft distance-based falloff
+                       so distant residues attend less strongly (SinFusion-inspired
+                       local receptive field to prevent overfitting on single
+                       trajectories). Ignored when spatial_sigma == 0.
 
         Returns:
             (output, new_kv):
@@ -210,6 +218,28 @@ class SpatioTemporalAttention(nn.Module):
         attn_bias = self._build_attn_bias(
             B, L, N, mask, s_frames.device, q.dtype,
             L_kv=L_total, mask_kv=full_mask_kv)
+
+        # 6b. Spatial Gaussian bias (SinFusion-inspired local receptive field)
+        #     Adds -(d_ij / sigma)^2 to attention logits so distant residues
+        #     contribute exponentially less.  Only the spatial (within-frame)
+        #     component is penalised; cross-frame pairs of the same residue
+        #     are unaffected (distance = 0 within a token's own residue).
+        if self.spatial_sigma > 0 and ca_pos is not None:
+            # ca_pos: [B, L, N, 3] → flatten to [B, T_new, 3]
+            ca_flat = ca_pos.reshape(B, T_new, 3)
+            if L_cached > 0 and kv_cache is not None:
+                # For cached context, we don't have CA positions — assume
+                # same-residue tokens across frames have zero spatial penalty.
+                # Build a dummy spatial bias of zeros for cached tokens.
+                spatial_bias = torch.zeros(B, 1, T_new, L_total * N,
+                                           device=s_frames.device, dtype=q.dtype)
+                # Only compute for the new×new block
+                new_dist = torch.cdist(ca_flat, ca_flat)  # [B, T_new, T_new]
+                spatial_bias[:, :, :, L_cached * N:] = -(new_dist / self.spatial_sigma).pow(2).unsqueeze(1)
+            else:
+                dist = torch.cdist(ca_flat, ca_flat)  # [B, T, T]
+                spatial_bias = -(dist / self.spatial_sigma).pow(2).unsqueeze(1)  # [B, 1, T, T]
+            attn_bias = attn_bias + spatial_bias
 
         # 7. Scaled dot-product attention
         attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
