@@ -82,9 +82,14 @@ class SE3Diffusion(L.LightningModule):
         min_t:        Minimum diffusion time (avoids t≈0 instability).
         max_t:        Maximum diffusion time.  Set to ~0.1 for Diffusion
                       Forcing (STAR-MD multi-frame); 1.0 for unconditional.
-        rot_weight:   Rotation score loss weight.
-        trans_weight: Translation score loss weight.
+        rot_weight:   Rotation score loss weight (paper: 0.5).
+        trans_weight: Translation score loss weight (paper: 1.0).
         psi_weight:   Torsion angle loss weight.
+        bb_atom_weight: Backbone atom position loss weight (paper: 1.0, filtered at t < 0.25).
+        dist_mat_weight: Distance matrix loss weight (paper: 1.0, filtered at t < 0.25).
+        aux_weight:   Multiplier for auxiliary losses (paper: 0.25).
+        rot_t_threshold: Only apply rotation loss when t < this (paper: 0.2).
+        aux_t_threshold: Only apply aux losses when t < this (paper: 0.25).
         cosine_T_max: CosineAnnealingLR period in steps.
         ema_decay:    EMA decay rate (0 = disabled, 0.999 = MDGen default).
     """
@@ -96,9 +101,14 @@ class SE3Diffusion(L.LightningModule):
         lr: float = 1e-4,
         min_t: float = 0.01,
         max_t: float = 1.0,
-        rot_weight: float = 1.0,
+        rot_weight: float = 0.5,
         trans_weight: float = 1.0,
         psi_weight: float = 1.0,
+        bb_atom_weight: float = 1.0,
+        dist_mat_weight: float = 1.0,
+        aux_weight: float = 0.25,
+        rot_t_threshold: float = 0.2,
+        aux_t_threshold: float = 0.25,
         cosine_T_max: int = 100_000,
         ema_decay: float = 0.999,
     ):
@@ -111,6 +121,11 @@ class SE3Diffusion(L.LightningModule):
         self.rot_weight = rot_weight
         self.trans_weight = trans_weight
         self.psi_weight = psi_weight
+        self.bb_atom_weight = bb_atom_weight
+        self.dist_mat_weight = dist_mat_weight
+        self.aux_weight = aux_weight
+        self.rot_t_threshold = rot_t_threshold
+        self.aux_t_threshold = aux_t_threshold
         self.cosine_T_max = cosine_T_max
         self.step_counter = 0  # mirrors SinFusion's step_counter
         self.ema = EMA(model, decay=ema_decay) if ema_decay > 0 else None
@@ -201,7 +216,13 @@ class SE3Diffusion(L.LightningModule):
     # ------------------------------------------------------------------
 
     def _score_loss(self, pred: dict, batch: dict, mask: torch.Tensor):
-        """Scale-normalised MSE over rotation score, translation score, and psi.
+        """Scale-normalised MSE over rotation score, translation score, psi,
+        and auxiliary backbone/distance losses.
+
+        Following STAR-MD paper appendix:
+          - Rotation loss filtered by t < rot_t_threshold (default 0.2)
+          - Backbone atom + distance matrix auxiliary losses at t < aux_t_threshold (0.25)
+          - Auxiliary losses scaled by aux_weight (0.25)
 
         Handles both single-frame [B, N, 3] and multi-frame [B, L, N, 3] scores.
         For multi-frame batches, mask [B, N] is expanded to [B, L, N] so all L
@@ -211,6 +232,7 @@ class SE3Diffusion(L.LightningModule):
             (total, rot_loss, trans_loss, psi_loss)
         """
         multi_frame = pred['rot_score'].ndim == 4  # [B, L, N, 3]
+        t = batch['t'].float()  # [B]
 
         if multi_frame:
             L = pred['rot_score'].shape[1]
@@ -222,6 +244,8 @@ class SE3Diffusion(L.LightningModule):
             rot_scaling   = batch['rot_score_scaling'].float()[:, None, None] + 1e-8
             trans_scaling = batch['trans_score_scaling'].float()[:, None, None] + 1e-8
             mask_exp = mask
+
+        # ── Core score losses ─────────────────────────────────────────────
 
         rot_mse = F.mse_loss(
             pred['rot_score']          / rot_scaling,
@@ -236,16 +260,50 @@ class SE3Diffusion(L.LightningModule):
         ).sum(dim=-1)   # [B, N] or [B, L, N]
 
         n_visible  = mask_exp.sum() + 1e-8
-        rot_loss   = (rot_mse   * mask_exp).sum() / n_visible
+
+        # Time-filtered rotation loss (paper: only apply when t < 0.2)
+        rot_t_mask = (t < self.rot_t_threshold).float()  # [B]
+        if multi_frame:
+            rot_t_mask = rot_t_mask[:, None, None].expand_as(rot_mse)
+        else:
+            rot_t_mask = rot_t_mask[:, None].expand_as(rot_mse)
+        rot_loss = (rot_mse * mask_exp * rot_t_mask).sum() / (n_visible + 1e-8)
+
         trans_loss = (trans_mse * mask_exp).sum() / n_visible
 
-        gt_psi  = batch['torsion_angles_sin_cos'][..., 2, :].float()  # [B,N,2] or [B,L,N,2]
+        gt_psi  = batch['torsion_angles_sin_cos'][..., 2, :].float()
         psi_mse = F.mse_loss(pred['psi'], gt_psi, reduction='none').sum(dim=-1)
         psi_loss = (psi_mse * mask_exp).sum() / n_visible
 
         total = (self.rot_weight   * rot_loss
                + self.trans_weight * trans_loss
                + self.psi_weight   * psi_loss)
+
+        # ── Auxiliary losses (paper: filtered at t < 0.25, weight 0.25) ──
+
+        aux_t_mask = (t < self.aux_t_threshold).float()  # [B]
+        has_aux = aux_t_mask.sum() > 0 and self.aux_weight > 0
+
+        if has_aux and 'atom37' in pred and 'atom37_pos' in batch:
+            # Backbone atom position loss
+            pred_bb = pred['atom37']        # [B, N, 37, 3] (single-frame only)
+            gt_bb   = batch['atom37_pos'].float()
+            bb_mask = (gt_bb.abs().sum(-1) > 1e-6).float()  # [B, N, 37]
+            bb_mse  = ((pred_bb - gt_bb) ** 2).sum(-1)      # [B, N, 37]
+            bb_loss = (bb_mse * bb_mask * mask[..., None]).sum() / (bb_mask.sum() + 1e-8)
+            bb_loss = bb_loss * aux_t_mask.mean()  # scale by fraction of samples below threshold
+            total = total + self.aux_weight * self.bb_atom_weight * bb_loss
+
+            # Distance matrix loss (pairwise CA-CA)
+            pred_ca = pred_bb[:, :, 1, :]  # [B, N, 3] — CA is index 1 in atom37
+            gt_ca   = gt_bb[:, :, 1, :]
+            pred_dist = torch.cdist(pred_ca, pred_ca)  # [B, N, N]
+            gt_dist   = torch.cdist(gt_ca, gt_ca)
+            dist_mask = mask[:, :, None] * mask[:, None, :]  # [B, N, N]
+            dist_mse  = ((pred_dist - gt_dist) ** 2 * dist_mask).sum() / (dist_mask.sum() + 1e-8)
+            dist_mse  = dist_mse * aux_t_mask.mean()
+            total = total + self.aux_weight * self.dist_mat_weight * dist_mse
+
         return total, rot_loss, trans_loss, psi_loss
 
     # ------------------------------------------------------------------

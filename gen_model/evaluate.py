@@ -153,6 +153,66 @@ def _write_trajectory(atom14: np.ndarray, aatype: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
+# Structural validity (STAR-MD paper appendix)
+# ---------------------------------------------------------------------------
+
+def compute_validity(atom14: np.ndarray, aatype: np.ndarray) -> dict:
+    """Compute structural validity metrics following STAR-MD paper.
+
+    Args:
+        atom14: [T, N, 14, 3] generated atom14 coordinates
+        aatype: [N] residue type indices
+
+    Returns:
+        dict with ca_clash_rate, chain_break_rate, ca_valid_rate, per-frame details
+    """
+    CA_CLASH_THRESHOLD = 2.0    # Angstroms (paper)
+    CHAIN_BREAK_THRESHOLD = 3.8  # Angstroms (paper)
+    T, N = atom14.shape[:2]
+
+    ca = atom14[:, :, 1, :]  # [T, N, 3] — atom14 index 1 = CA
+
+    ca_clashes = 0
+    chain_breaks = 0
+    total_pairs = 0
+    total_bonds = 0
+
+    for t in range(T):
+        ca_t = ca[t]  # [N, 3]
+
+        # Ca-Ca clashes: any pair of non-adjacent CA atoms closer than 2.0 Å
+        for i in range(N):
+            for j in range(i + 2, N):  # skip adjacent (i, i+1)
+                d = np.linalg.norm(ca_t[i] - ca_t[j])
+                if d < CA_CLASH_THRESHOLD and d > 0.1:  # skip zero-distance (padding)
+                    ca_clashes += 1
+                total_pairs += 1
+
+        # Chain breaks: consecutive CA atoms farther than 3.8 Å
+        for i in range(N - 1):
+            d = np.linalg.norm(ca_t[i + 1] - ca_t[i])
+            if d > CHAIN_BREAK_THRESHOLD or d < 0.1:  # too far or zero (padding)
+                chain_breaks += 1
+            total_bonds += 1
+
+    ca_clash_rate = ca_clashes / max(total_pairs, 1)
+    chain_break_rate = chain_breaks / max(total_bonds, 1)
+    ca_valid_rate = 1.0 - ca_clash_rate
+    aa_valid_rate = 1.0 - chain_break_rate
+    combined_valid = ca_valid_rate * aa_valid_rate * 100
+
+    return {
+        'ca_clash_rate': ca_clash_rate,
+        'chain_break_rate': chain_break_rate,
+        'ca_valid_pct': ca_valid_rate * 100,
+        'aa_valid_pct': aa_valid_rate * 100,
+        'combined_valid_pct': combined_valid,
+        'num_frames': T,
+        'num_residues': N,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Run MDGen analysis
 # ---------------------------------------------------------------------------
 
@@ -213,7 +273,7 @@ def run_mdgen_analysis(ref_dir: str, gen_dir: str, protein: str,
     return pkl_path
 
 
-def print_summary(pkl_path: str, mode: str):
+def print_summary(pkl_path: str, mode: str, validity: dict = None):
     """Load and print a human-readable summary from the MDGen results pickle."""
     import pickle
 
@@ -223,6 +283,12 @@ def print_summary(pkl_path: str, mode: str):
     print('\n' + '=' * 60)
     print(f'EVALUATION SUMMARY  ({mode} mode)')
     print('=' * 60)
+
+    if validity:
+        print(f'\nStructural Validity (STAR-MD paper metrics):')
+        print(f'  CA valid (no clashes <2.0A):     {validity["ca_valid_pct"]:.1f}%')
+        print(f'  AA valid (no chain breaks >3.8A): {validity["aa_valid_pct"]:.1f}%')
+        print(f'  Combined (CA * AA):               {validity["combined_valid_pct"]:.1f}%')
 
     for protein, results in all_results.items():
         print(f'\nProtein: {protein}')
@@ -338,6 +404,19 @@ def main():
     print('Writing generated PDB/XTC ...')
     _write_trajectory(gen_atom14, aatype, gen_traj_dir, args.protein)
 
+    # --- Structural validity (STAR-MD paper metrics) ---
+    print('Computing structural validity ...')
+    validity = compute_validity(gen_atom14, aatype)
+    print(f'  CA valid: {validity["ca_valid_pct"]:.1f}%  |  '
+          f'AA valid: {validity["aa_valid_pct"]:.1f}%  |  '
+          f'Combined: {validity["combined_valid_pct"]:.1f}%')
+
+    # Save validity results
+    import json as _json
+    validity_path = os.path.join(args.out_dir, 'validity.json')
+    with open(validity_path, 'w') as f:
+        _json.dump(validity, f, indent=2)
+
     # --- Run MDGen analysis ---
     ref_parent = os.path.join(args.out_dir, 'ref')
     pkl_path = run_mdgen_analysis(
@@ -349,7 +428,7 @@ def main():
         plot=not args.no_plot,
     )
 
-    print_summary(pkl_path, args.mode)
+    print_summary(pkl_path, args.mode, validity)
 
 
 if __name__ == '__main__':

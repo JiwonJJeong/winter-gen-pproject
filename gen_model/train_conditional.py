@@ -42,8 +42,8 @@ def main():
     parser.add_argument('--lr',                  type=float, default=1e-4)
     parser.add_argument('--save_dir',            type=str,   default='checkpoints/conditional')
     parser.add_argument('--stride',              type=int,   default=1)
-    parser.add_argument('--num_frames',          type=int,   default=16,
-                        help='Window length L (paper: 80; default 16 for limited data)')
+    parser.add_argument('--num_frames',          type=int,   default=8,
+                        help='Window length L (paper training: 8; inference: 80)')
     parser.add_argument('--ns_per_stored_frame', type=float, default=0.1,
                         help='Physical time between consecutive stored frames in ns')
     parser.add_argument('--min_t',               type=float, default=0.01,
@@ -56,7 +56,8 @@ def main():
                         help='Enable STAR-MD spatio-temporal attention (default: on)')
     parser.add_argument('--no_star',             dest='star_enabled', action='store_false',
                         help='Disable STAR-MD spatio-temporal attention')
-    parser.add_argument('--st_num_heads',        type=int,   default=4)
+    parser.add_argument('--st_num_heads',        type=int,   default=8,
+                        help='ST attention heads (paper: 8)')
     # MDGen-inspired options
     parser.add_argument('--grad_clip',           type=float, default=1.0,
                         help='Gradient clipping value (MDGen default: 1.0)')
