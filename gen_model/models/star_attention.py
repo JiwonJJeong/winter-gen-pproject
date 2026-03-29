@@ -12,11 +12,13 @@ Key properties:
   - AdaLN input conditioning on diffusion time t and physical stride Δt.
   - Output projection zero-initialized ("final" init) so the residual is identity
     at the start of training.
+  - KV-cache support for efficient autoregressive inference.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional, Tuple
 
 import gen_model.path_setup  # noqa: F401
 from model.ipa_pytorch import Linear
@@ -80,38 +82,49 @@ class SpatioTemporalAttention(nn.Module):
     def _build_attn_bias(
         self,
         B: int,
-        L: int,
+        L_q: int,
         N: int,
-        mask: torch.Tensor,
+        mask_q: torch.Tensor,
         device: torch.device,
         dtype: torch.dtype,
+        L_kv: int = 0,
+        mask_kv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Build additive attention bias combining causal and padding masks.
 
-        Returns:
-            attn_bias: [B, 1, L*N, L*N]  (head dim broadcast)
-        """
-        T = L * N
-        attn_bias = torch.zeros(B, 1, T, T, device=device, dtype=dtype)
+        Args:
+            L_q:     Number of query frames (new frames).
+            L_kv:    Total number of key/value frames (cached + new).
+                     When 0, defaults to L_q (no cache).
+            mask_q:  [B, L_q, N] mask for query frames.
+            mask_kv: [B, L_kv, N] mask for all KV frames. If None, uses mask_q.
 
-        # Block-causal mask: token at frame ℓ1 cannot attend to frame ℓ2 > ℓ1.
-        # Build a [L, L] block mask then expand to [L*N, L*N].
-        if self.causal and L > 1:
-            # future_mask[ℓ1, ℓ2] = True  iff ℓ2 > ℓ1
-            future = torch.triu(
-                torch.ones(L, L, device=device, dtype=torch.bool), diagonal=1
-            )  # [L, L]
-            # Expand to token level: each frame block is N×N
-            # [L, L] -> [L*N, L*N] via repeat_interleave
-            future_token = future.repeat_interleave(N, dim=0).repeat_interleave(N, dim=1)  # [L*N, L*N]
+        Returns:
+            attn_bias: [B, 1, L_q*N, L_kv*N]
+        """
+        if L_kv == 0:
+            L_kv = L_q
+        T_q = L_q * N
+        T_kv = L_kv * N
+
+        if mask_kv is None:
+            mask_kv = mask_q
+
+        attn_bias = torch.zeros(B, 1, T_q, T_kv, device=device, dtype=dtype)
+
+        # Block-causal mask: query at frame ℓq cannot attend to frame ℓkv > ℓq.
+        # Query frames are the LAST L_q frames in the KV sequence.
+        if self.causal and L_kv > 1:
+            L_cached = L_kv - L_q
+            q_frame = torch.arange(L_cached, L_kv, device=device)     # [L_q]
+            kv_frame = torch.arange(L_kv, device=device)              # [L_kv]
+            future = kv_frame[None, :] > q_frame[:, None]             # [L_q, L_kv]
+            future_token = future.repeat_interleave(N, dim=0).repeat_interleave(N, dim=1)
             attn_bias = attn_bias.masked_fill(future_token[None, None], float("-inf"))
 
-        # Padding mask: zero out attention *to* any padded token.
-        # mask: [B, L, N]  (1 = valid, 0 = padded)
-        # A padded token as key should receive -inf so it never contributes.
-        pad_token = (mask == 0).reshape(B, T)  # [B, T]  True = padded
-        # Broadcast over query dim: [B, 1, 1, T]
-        attn_bias = attn_bias.masked_fill(pad_token[:, None, None, :], float("-inf"))
+        # Padding mask on KV side
+        pad_kv = (mask_kv == 0).reshape(B, T_kv)
+        attn_bias = attn_bias.masked_fill(pad_kv[:, None, None, :], float("-inf"))
 
         return attn_bias
 
@@ -126,57 +139,89 @@ class SpatioTemporalAttention(nn.Module):
         seq_idx: torch.Tensor,
         mask: torch.Tensor,
         cond: torch.Tensor,
-    ) -> torch.Tensor:
+        kv_cache: Optional[dict] = None,
+    ) -> Tuple[torch.Tensor, dict]:
         """
         Args:
-            s_frames:  [B, L, N, c_s]  node embeddings for L frames.
-            frame_idx: [L]              integer frame position indices for RoPE.
+            s_frames:  [B, L, N, c_s]  node embeddings for L (new) frames.
+            frame_idx: [L_new]          frame position indices for the new frames.
             seq_idx:   [B, N]           integer residue position indices for RoPE.
-            mask:      [B, L, N]        1 = valid residue, 0 = padded.
+            mask:      [B, L, N]        1 = valid residue, 0 = padded (new frames).
             cond:      [B, cond_dim]    AdaLN conditioning (t_emb || delta_t_emb).
+            kv_cache:  Optional dict with 'k', 'v' [B, H, T_cached, D] from
+                       previously finalized frames (read-only, not modified).
 
         Returns:
-            [B, L, N, c_s]  updated node embeddings (residual connection applied
-                            outside this module by the caller in IpaScore).
+            (output, new_kv):
+              output: [B, L, N, c_s]  residual delta for the new frames.
+              new_kv: dict with 'k', 'v' [B, H, L*N, D] for the new frames
+                      (RoPE-applied K and raw V). Caller decides whether to
+                      append to the persistent cache.
         """
         B, L, N, _ = s_frames.shape
-        T = L * N
+        T_new = L * N
         H, D = self.num_heads, self.head_dim
 
         # 1. AdaLN input normalisation conditioned on t and delta_t
         x = self.adaln(s_frames, cond)               # [B, L, N, c_s]
 
         # 2. Flatten frames → tokens
-        x_flat = x.reshape(B, T, self.c_s)           # [B, T, c_s]
+        x_flat = x.reshape(B, T_new, self.c_s)       # [B, T_new, c_s]
 
         # 3. Project to Q, K, V
-        q = self.q_proj(x_flat)                      # [B, T, c_s]
-        k = self.k_proj(x_flat)
-        v = self.v_proj(x_flat)
+        q = self.q_proj(x_flat)                       # [B, T_new, c_s]
+        k_new = self.k_proj(x_flat)
+        v_new = self.v_proj(x_flat)
 
         # Reshape to multi-head: [B, H, T, D]
         def split_heads(t):
-            return t.reshape(B, T, H, D).permute(0, 2, 1, 3)
+            return t.reshape(B, -1, H, D).permute(0, 2, 1, 3)
 
-        q, k, v = split_heads(q), split_heads(k), split_heads(v)
+        q = split_heads(q)          # [B, H, T_new, D]
+        k_new = split_heads(k_new)  # [B, H, T_new, D]
+        v_new = split_heads(v_new)  # [B, H, T_new, D]
 
-        # 4. Apply 2D-RoPE to Q and K
+        # 4. Apply 2D-RoPE to Q and new K
         q = self.rope(q, seq_idx=seq_idx, frame_idx=frame_idx)
-        k = self.rope(k, seq_idx=seq_idx, frame_idx=frame_idx)
+        k_new = self.rope(k_new, seq_idx=seq_idx, frame_idx=frame_idx)
 
-        # 5-6. Scaled dot-product attention with causal + padding bias
-        attn_bias = self._build_attn_bias(B, L, N, mask, s_frames.device, q.dtype)
+        # Store new K/V for potential caching by caller
+        new_kv = {'k': k_new.detach(), 'v': v_new.detach()}
 
-        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [B, H, T, T]
+        # 5. Prepend cached K/V if available
+        L_cached = 0
+        if kv_cache is not None and 'k' in kv_cache:
+            L_cached = kv_cache['k'].shape[2] // N
+            k = torch.cat([kv_cache['k'], k_new], dim=2)  # [B, H, T_total, D]
+            v = torch.cat([kv_cache['v'], v_new], dim=2)
+        else:
+            k = k_new
+            v = v_new
+
+        L_total = L_cached + L
+
+        # 6. Build attention mask accounting for cached frames
+        if L_cached > 0:
+            cached_mask = torch.ones(B, L_cached, N, device=s_frames.device, dtype=mask.dtype)
+            full_mask_kv = torch.cat([cached_mask, mask], dim=1)  # [B, L_total, N]
+        else:
+            full_mask_kv = mask
+
+        attn_bias = self._build_attn_bias(
+            B, L, N, mask, s_frames.device, q.dtype,
+            L_kv=L_total, mask_kv=full_mask_kv)
+
+        # 7. Scaled dot-product attention
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         attn_logits = attn_logits + attn_bias
         attn_weights = torch.softmax(attn_logits, dim=-1)
 
-        out = torch.matmul(attn_weights, v)          # [B, H, T, D]
+        out = torch.matmul(attn_weights, v)           # [B, H, T_new, D]
 
-        # 7. Merge heads and unflatten back to [B, L, N, c_s]
-        out = out.permute(0, 2, 1, 3).reshape(B, L, N, self.c_s)  # [B, L, N, c_s]
+        # 8. Merge heads and unflatten back to [B, L, N, c_s]
+        out = out.permute(0, 2, 1, 3).reshape(B, L, N, self.c_s)
 
-        # 8. Output projection (zero-init → identity residual at init)
-        out = self.out_proj(out)                     # [B, L, N, c_s]
+        # 9. Output projection (zero-init → identity residual at init)
+        out = self.out_proj(out)
 
-        return out
+        return out, new_kv

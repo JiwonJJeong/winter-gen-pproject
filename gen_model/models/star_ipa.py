@@ -5,15 +5,19 @@ Extends the upstream SE3-diffusion IpaScore
 
 Changes vs. upstream IpaScore:
   1. __init__: injects one SpatioTemporalAttention block per trunk block when
-     model_conf.star.enabled is True.
+     model_conf.star.enabled is True.  Removes the upstream SeqTransformer
+     (skip_embed, seq_tfmr, post_tfmr, node_transition) that is redundant
+     with the joint spatio-temporal attention.
   2. forward: adds frame_idx / cond kwargs and multi-frame flatten/unflatten
      logic so the model operates jointly over L MD frames.
+  3. KV-cache support for efficient autoregressive inference.
 
 Single-frame behaviour (L=1 or frame_idx=None) is identical to the upstream
 IpaScore — StarIpaScore is a drop-in replacement.
 """
 
 import torch
+import torch.nn as nn
 import gen_model.path_setup  # noqa: F401  — adds extern/se3_diffusion to sys.path
 
 from model.ipa_pytorch import IpaScore
@@ -24,10 +28,14 @@ from gen_model.models.star_attention import SpatioTemporalAttention
 class StarIpaScore(IpaScore):
     """IpaScore with optional STAR-MD spatio-temporal cross-frame attention.
 
+    When star.enabled is True, the upstream per-frame SeqTransformer is
+    replaced by joint spatio-temporal attention (following the STAR-MD paper:
+    IPA → ST Attention → Pair Update + Coord Prediction).
+
     Args:
         model_conf: OmegaConf node.  If model_conf.star.enabled is True, one
             SpatioTemporalAttention block is injected into self.trunk after
-            each IPA block.
+            each IPA block, and the upstream SeqTransformer modules are removed.
         diffuser:   SE3Diffuser instance (passed through to IpaScore).
     """
 
@@ -35,23 +43,32 @@ class StarIpaScore(IpaScore):
         super().__init__(model_conf, diffuser)
 
         star_conf = getattr(model_conf, 'star', None)
-        if star_conf is not None and star_conf.enabled:
+        self._star_enabled = star_conf is not None and star_conf.enabled
+
+        if self._star_enabled:
             ipa_conf = model_conf.ipa
             cond_dim = 2 * model_conf.embed.index_embed_size  # 2*32 = 64
+
             for b in range(ipa_conf.num_blocks):
+                # Inject ST attention
                 self.trunk[f'st_attn_{b}'] = SpatioTemporalAttention(
                     c_s=ipa_conf.c_s,
                     num_heads=star_conf.st_num_heads,
                     cond_dim=cond_dim,
                     causal=star_conf.causal,
                 )
+                # Remove upstream SeqTransformer modules (redundant with ST attn)
+                for key in [f'skip_embed_{b}', f'seq_tfmr_{b}',
+                            f'post_tfmr_{b}', f'node_transition_{b}']:
+                    if key in self.trunk:
+                        del self.trunk[key]
 
     # ------------------------------------------------------------------
     # Forward — adds multi-frame support on top of the upstream logic.
     # ------------------------------------------------------------------
 
     def forward(self, init_node_embed, edge_embed, input_feats,
-                frame_idx=None, cond=None):
+                frame_idx=None, cond=None, kv_caches=None):
         """
         Args:
             init_node_embed: [B, N, c_s]  or  [B, L, N, c_s]
@@ -61,6 +78,10 @@ class StarIpaScore(IpaScore):
             frame_idx:       [L] integer frame positions for RoPE; None for single-frame.
             cond:            [B, 2*D] AdaLN conditioning (t_emb ∥ delta_t_emb);
                              None → zeros (no temporal conditioning).
+            kv_caches:       Optional list of dicts (one per trunk block) for
+                             KV-cache during autoregressive inference.  Each dict
+                             is passed to SpatioTemporalAttention and updated
+                             in-place.  None → no caching (training mode).
 
         Returns:
             dict with psi, rot_score, trans_score, final_rigids.
@@ -109,9 +130,10 @@ class StarIpaScore(IpaScore):
             _coord_scale = float(_cs.float().mean()) if _cs is not None else 1.0
 
         # Sequence transformer Gaussian bias (seq_tfmr_sigma). 0 = disabled.
+        # Only used when STAR-MD is disabled (upstream SeqTransformer path).
         _seq_cutoff    = float(getattr(self._ipa_conf, 'seq_tfmr_sigma', 0.0))
         _seq_tfmr_mask = None
-        if _seq_cutoff > 0.0:
+        if _seq_cutoff > 0.0 and not self._star_enabled:
             num_res = node_mask.shape[-1]
             idx = torch.arange(num_res, device=node_mask.device, dtype=torch.float32)
             seq_dist = torch.abs(idx.unsqueeze(0) - idx.unsqueeze(1))  # [N, N]
@@ -135,15 +157,17 @@ class StarIpaScore(IpaScore):
             ipa_embed *= node_mask[..., None]
             node_embed = self.trunk[f'ipa_ln_{b}'](node_embed + ipa_embed)
 
-            seq_tfmr_in = torch.cat([
-                node_embed, self.trunk[f'skip_embed_{b}'](init_node_embed)
-            ], dim=-1)
-            seq_tfmr_out = self.trunk[f'seq_tfmr_{b}'](
-                seq_tfmr_in, mask=_seq_tfmr_mask,
-                src_key_padding_mask=1 - node_mask)
-            node_embed = node_embed + self.trunk[f'post_tfmr_{b}'](seq_tfmr_out)
-            node_embed = self.trunk[f'node_transition_{b}'](node_embed)
-            node_embed = node_embed * node_mask[..., None]
+            # ── Per-frame SeqTransformer (upstream, only when STAR disabled) ─
+            if not self._star_enabled:
+                seq_tfmr_in = torch.cat([
+                    node_embed, self.trunk[f'skip_embed_{b}'](init_node_embed)
+                ], dim=-1)
+                seq_tfmr_out = self.trunk[f'seq_tfmr_{b}'](
+                    seq_tfmr_in, mask=_seq_tfmr_mask,
+                    src_key_padding_mask=1 - node_mask)
+                node_embed = node_embed + self.trunk[f'post_tfmr_{b}'](seq_tfmr_out)
+                node_embed = self.trunk[f'node_transition_{b}'](node_embed)
+                node_embed = node_embed * node_mask[..., None]
 
             # ── Cross-frame attention (STAR-MD) ───────────────────────────
             if multi_frame and f'st_attn_{b}' in self.trunk:
@@ -152,8 +176,11 @@ class StarIpaScore(IpaScore):
                     B, cond_dim, device=node_embed.device, dtype=node_embed.dtype)
                 st_mask = unflat(node_mask)        # [B, L, N]
                 nef     = unflat(node_embed)       # [B, L, N, c_s]
-                delta   = self.trunk[f'st_attn_{b}'](
-                    nef, frame_idx, input_feats['seq_idx'], st_mask, st_cond)
+
+                cache_b = kv_caches[b] if kv_caches is not None else None
+                delta, new_kv_b = self.trunk[f'st_attn_{b}'](
+                    nef, frame_idx, input_feats['seq_idx'], st_mask, st_cond,
+                    kv_cache=cache_b)
                 node_embed = flat(nef + delta)     # residual → [B*L, N, c_s]
                 node_embed = node_embed * node_mask[..., None]
 

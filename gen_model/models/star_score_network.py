@@ -86,7 +86,7 @@ class StarScoreNetwork(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, input_feats: dict) -> dict:
+    def forward(self, input_feats: dict, kv_caches=None) -> dict:
         """Compute reverse-diffusion scores for a batch.
 
         Handles both:
@@ -145,7 +145,7 @@ class StarScoreNetwork(nn.Module):
         # Run score model (StarIpaScore)
         model_out = self.score_model(
             init_node_embed, init_edge_embed, input_feats,
-            frame_idx=frame_idx, cond=cond,
+            frame_idx=frame_idx, cond=cond, kv_caches=kv_caches,
         )
 
         # Psi angle prediction with fixed-residue masking
