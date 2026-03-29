@@ -326,7 +326,8 @@ def main():
     parser.add_argument('--protein',       type=str, default=None,
                         help='Protein name to seed from (uses first val frame)')
     parser.add_argument('--output',        type=str, default='generated_traj.pt')
-    parser.add_argument('--total_frames',  type=int, default=100)
+    parser.add_argument('--total_frames',  type=int, default=250,
+                        help='Number of frames to generate (ATLAS default: 250)')
     parser.add_argument('--num_frames',    type=int, default=16,
                         help='Training window size L (must match checkpoint)')
     parser.add_argument('--delta_t',       type=float, default=0.1,

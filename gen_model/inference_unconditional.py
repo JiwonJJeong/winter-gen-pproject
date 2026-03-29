@@ -190,8 +190,8 @@ def main():
                         help='Protein name as used in atlas.csv (e.g. 4o66_C)')
     parser.add_argument('--num_steps',    type=int, default=100,
                         help='Number of reverse SDE steps')
-    parser.add_argument('--num_samples',  type=int, default=5,
-                        help='Number of independent samples to generate')
+    parser.add_argument('--num_samples',  type=int, default=100,
+                        help='Number of independent samples to generate (default: 100 for evaluation)')
     parser.add_argument('--coord_scale',  type=float, default=None,
                         help='Coordinate scale factor (default: computed from trajectory)')
     parser.add_argument('--lora_r',       type=int,   default=0,
