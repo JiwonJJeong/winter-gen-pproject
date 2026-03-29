@@ -1,6 +1,68 @@
-# Generative Model for Protein MD Trajectories
+# STAR-MD: Single-Trajectory SE(3) Diffusion for Protein MD
 
-SE(3) score-matching diffusion on protein backbone rigid frames, trained on MD trajectory data.
+SE(3) score-matching diffusion on protein backbone rigid frames, combining
+the **STAR-MD** network architecture with **SinFusion**'s single-trajectory
+training protocol. Trained on one MD trajectory, generates new conformations
+(unconditional) or entire trajectories (conditional, autoregressive).
+
+---
+
+## Method Overview
+
+### Our Approach
+
+We adapt two published methods for single-trajectory protein MD generation:
+
+- **STAR-MD** (Shoghi et al., ICLR 2026) — spatio-temporal attention with
+  block-causal masking, 2D-RoPE, AdaLN conditioning, and Diffusion Forcing
+  for multi-frame training.
+- **SinFusion** (Nikankin et al., ICML 2023) — single-video DDPM training
+  protocol with virtual epochs, batch size 1, curriculum learning, and
+  spatial augmentation to prevent overfitting.
+
+The model trains on a single replica of a single protein's MD trajectory
+and learns to generate new conformations that match the equilibrium
+distribution and dynamics of that protein.
+
+### Comparison: Our Model vs. MDGen vs. MDGen Naive
+
+| Aspect | **Our Model** | **MDGen** (pre-trained) | **MDGen Naive** (single-traj) |
+|--------|---------------|-------------------------|-------------------------------|
+| **Diffusion** | SE(3) score matching (VP-SDE on SO(3)×R³) | Flow matching (linear coupling, velocity prediction) | Flow matching (same as MDGen) |
+| **Architecture** | IPA → **joint** spatio-temporal attention (N×L tokens, block-causal, 2D-RoPE) | IPA → **separate** spatial attn → temporal attn (sequential) | Same as MDGen |
+| **Representation** | SE(3) rigid frames (7-dim: quaternion + translation) | Latent 21-dim (7 frame offsets + 14 torsion sin/cos) | Same as MDGen |
+| **Training data** | 1 trajectory, 1 protein | 1266 ATLAS proteins | 1 trajectory, 1 protein |
+| **Training protocol** | SinFusion: virtual epoch=5000, batch=1, stratified t, curriculum for δt, context noise | Standard: large dataset, batch=1, uniform t | Standard: same as MDGen (no anti-overfitting) |
+| **Conditioning** | AdaLN on [t_emb ∥ δt_emb], sc_ca_t (prev frame CA) | Latent conditioning (frame 0 offsets) | Same as MDGen |
+| **Inference** | Reverse SDE, autoregressive with context noise (Diffusion Forcing) | ODE solver (Dopri5), autoregressive | Same as MDGen |
+| **Positional encoding** | 2D-RoPE (residue × frame) | Separate RoPE per axis | Same as MDGen |
+
+### Why "MDGen Naive" as a baseline?
+
+Training MDGen's own architecture on one trajectory without any
+anti-overfitting techniques isolates the contribution of:
+1. **STAR-MD architecture** — joint ST attention vs. separate spatial/temporal
+2. **SinFusion protocol** — virtual epochs, curriculum, batch=1, stratified noise
+3. **SE(3) score matching** — vs. flow matching
+
+If MDGen Naive overfits badly while our model doesn't, the SinFusion
+anti-overfitting techniques are the key. If both perform similarly, the
+architectural differences (joint vs. separate attention) matter more.
+
+---
+
+## Anti-Overfitting Techniques (SinFusion Protocol)
+
+| Technique | What it does | Default |
+|-----------|-------------|---------|
+| **Virtual epoch size** | Reports 5000 samples/epoch regardless of trajectory length; each sample is a different random crop + noise level | `--virtual_epoch_size 5000` |
+| **Batch size 1** | Maximum stochasticity per update; works with LayerNorm (not BatchNorm) | `--batch_size 1` |
+| **Stratified t sampling** | Divides [min_t, max_t] into B strata, one sample per stratum — uniform noise coverage | In `SE3Diffusion.forward()` |
+| **Curriculum for δt** | Phase 1 (<75k): δt ∈ [0.01, 0.1] ns; Phase 2 (75k-150k): [0.01, 1.0]; Phase 3: [0.01, 10.0] | `--curriculum` |
+| **Spatial cropping** | Random 95% spatial crop with IPF-balanced seed weights | `crop_ratio=0.95` |
+| **Context noise** | All L frames noised at τ ∼ U[0.01, 0.1] during training; at inference τ ∼ U[0, 0.05] on history frames | Diffusion Forcing |
+| **EMA** | Exponential moving average of weights (decay 0.999) for validation/inference | `--ema_decay 0.999` |
+| **Gradient clipping** | Norm clipping at 1.0 | `--grad_clip 1.0` |
 
 ---
 
@@ -8,259 +70,109 @@ SE(3) score-matching diffusion on protein backbone rigid frames, trained on MD t
 
 ```
 gen_model/
-├── simple_train.py          # SE(3) Lightning training module (SE3Module)
-├── simple_inference.py      # Inference script
-├── dataset.py               # MD trajectory data loader (MDGenDataset)
+├── train_unconditional.py       # Unconditional training (SinFusion protocol)
+├── train_conditional.py         # Conditional STAR-MD training (Diffusion Forcing)
+├── train_base.py                # Shared config helpers
+├── se3_diffusion_module.py      # Lightning modules (SE3Diffusion, ConditionalSE3Diffusion, EMA)
+├── inference_unconditional.py   # Generate conformations from noise
+├── inference_conditional.py     # Autoregressive trajectory rollout
+├── evaluate.py                  # Evaluation suite (torsion JSD, TICA JSD, autocorrelation)
+├── hpo.py                       # Optuna hyperparameter search
+├── dataset.py                   # Backward-compat shim
+├── data/
+│   ├── dataset.py               # MDGenDataset, ConditionalMDGenDataset
+│   ├── geometry.py              # atom14↔atom37↔frames, torsion extraction
+│   ├── all_atom.py              # Backbone reconstruction from frames + psi
+│   └── residue_constants.py     # Amino acid geometry constants (extended)
 ├── models/
-│   ├── score_network.py     # ScoreNetwork: Embedder + IpaScore
-│   └── ipa_pytorch.py       # Invariant Point Attention + TorsionAngles
+│   ├── star_score_network.py    # StarScoreNetwork: Embedder + StarIpaScore
+│   ├── star_ipa.py              # StarIpaScore: IPA + joint ST attention
+│   ├── star_attention.py        # SpatioTemporalAttention (block-causal, 2D-RoPE, KV-cache)
+│   ├── rope2d.py                # 2D Rotary Position Embedding
+│   ├── adaln.py                 # Adaptive Layer Normalization
+│   └── lora.py                  # LoRA adapter
 ├── diffusion/
-│   ├── se3_diffuser.py      # SE3Diffuser: combines SO(3) + R³
-│   ├── so3_diffuser.py      # SO(3) rotation diffusion via IGSO(3)
-│   └── r3_diffuser.py       # R³ translation diffusion via VP-SDE
-├── splits/                  # Train/val/test CSV splits
-├── geometry.py              # atom37↔frames, torsion angle extraction
-├── all_atom.py              # Backbone reconstruction from frames + psi
-├── rigid_utils.py           # Rigid / Rotation / Quaternion math
-└── residue_constants.py     # Amino acid geometry constants
+│   ├── se3_diffuser.py          # Shim → extern/se3_diffusion
+│   ├── r3_diffuser.py           # Shim → extern/se3_diffusion
+│   └── so3_diffuser.py          # Shim → extern/se3_diffusion
+├── utils/
+│   ├── rigid_utils.py           # Rigid / Rotation / Quaternion math
+│   ├── tensor_utils.py          # Batched gather
+│   └── structure_utils.py       # PDB I/O, CA trajectory conversion
+└── splits/                      # atlas.csv, frame_splits.csv
 ```
-
----
-
-## End-to-End Data Flow
-
-### 1. Dataset → Batch
-
-`MDGenDataset.__getitem__` produces one sample per MD frame:
-
-```
-.npy file  →  atom14 coords [L, 14, 3]
-           →  atom37 coords [L, 37, 3]          (via atom14_to_atom37)
-           →  backbone frames [L]  (Rigid)       (via atom14_to_frames)
-           →  torsion_angles_sin_cos [L, 7, 2]  (via atom37_to_torsions)
-```
-
-The 7 torsion angles per residue are (in order): ω, φ, ψ, χ1, χ2, χ3, χ4.
-Index 2 (`torsion_angles_sin_cos[..., 2, :]`) is **ψ** (the only one the model predicts).
-
-**Centering and scaling** (applied to translations before output):
-```
-centroid   = mean(CA positions)
-atom14_pos = (atom14_pos - centroid) * coord_scale
-atom37_pos = (atom37_pos - centroid) * coord_scale
-rigids_0[..., 4:] = (rigids_0[..., 4:] - centroid) * coord_scale
-```
-`coord_scale = 1 / std(CA coords)` computed once from training data.
-
-### 2. Spatial Cropping (training only)
-
-When `crop_ratio < 1.0`, a random seed residue is chosen and the nearest
-`k = int(L * crop_ratio)` residues (by CA–CA distance) form the visible crop:
-
-```
-mask [L]:  1.0 = visible (inside crop)
-           0.0 = masked  (outside crop, not diffused, not supervised)
-```
-
-Seed weights are computed via **Iterative Proportional Fitting (IPF)** on the
-reference frame so that every residue has equal probability of being included
-across different crops.
-
-### 3. SE(3) Forward Diffusion
-
-`SE3Diffuser.forward_marginal(rigids_0, t, diffuse_mask=mask)` is called per
-sample with `t ~ Uniform(min_t, 1.0)` during training and `t = 1.0` at
-validation.
-
-```
-Rotations  →  SO3Diffuser:  IGSO(3) Brownian motion with logarithmic sigma schedule
-Translations → R3Diffuser:  VP-SDE  (variance-preserving SDE)
-```
-
-For masked residues (`mask = 0`), the diffuser leaves them at their clean
-values and sets their scores to zero:
-
-```
-rot_t[mask=0]    = rot_0        (not noised)
-trans_t[mask=0]  = trans_0      (not noised)
-rot_score[mask=0]   = 0
-trans_score[mask=0] = 0
-```
-
-**Batch keys produced by the dataset:**
-
-| Key | Shape | Description |
-|-----|-------|-------------|
-| `rigids_0` | `[L, 7]` | Clean frame (quat[4] + trans[3]) |
-| `rigids_t` | `[L, 7]` | Noised frame at time t |
-| `rot_score` | `[L, 3]` | SO(3) score target |
-| `trans_score` | `[L, 3]` | R³ score target |
-| `rot_score_scaling` | scalar | Score normalisation for this t |
-| `trans_score_scaling` | scalar | Score normalisation for this t |
-| `t` | scalar | Noise level in [0, 1] |
-| `res_mask` | `[L]` | Spatial crop mask (1=visible) |
-| `fixed_mask` | `[L]` | Motif mask (all 0 here — everything is diffused) |
-| `torsion_angles_sin_cos` | `[L, 7, 2]` | Ground-truth torsions |
-| `seq_idx` | `[L]` | 1-indexed residue positions |
-| `sc_ca_t` | `[L, 3]` | Self-conditioning CA positions (zeros initially) |
-| `atom14_pos` | `[L, 14, 3]` | Clean atom positions (centred + scaled) |
-| `atom37_pos` | `[L, 37, 3]` | Clean all-atom positions (centred + scaled) |
-| `aatype` | `[L]` | Amino acid type indices |
-
-### 4. ScoreNetwork Forward Pass
-
-`ScoreNetwork.forward(batch)`:
-
-```
-seq_idx, t, fixed_mask, sc_ca_t
-        │
-        ▼
-    Embedder
-        │  node_embed [B, N, node_embed_size]
-        │  edge_embed [B, N, N, edge_embed_size]
-        ▼
-    IpaScore  (num_blocks × IPA + Transformer + BackboneUpdate)
-        │  Uses rigids_t as initial frames
-        │  Updates frames via rigid body composition (masked by diffuse_mask)
-        │
-        ├──→ calc_rot_score(init_rots, curr_rots, t)   → rot_score  [B, N, 3]
-        ├──→ calc_trans_score(init_trans, curr_trans, t) → trans_score [B, N, 3]
-        ├──→ TorsionAngles(node_embed)                  → psi [B, N, 2]  (sin/cos)
-        └──→ BackboneUpdate → final_rigids
-        │
-        ▼
-    ScoreNetwork applies:
-        psi_pred = model_psi  (since fixed_mask=0, always predicted)
-        atom37, atom14 = compute_backbone(final_rigids, psi_pred)
-```
-
-**Output dict:** `rot_score`, `trans_score`, `psi`, `rigids`, `atom37`, `atom14`
-
-The `rot_score` and `trans_score` outputs are zeroed for masked residues
-(`* node_mask`) inside `IpaScore`.
-
-### 5. What the Model Actually Reads from the Batch
-
-Despite the dataset producing ~20 keys, `ScoreNetwork.forward` consumes exactly **7**:
-
-| Key | Shape | Used for |
-|-----|-------|---------|
-| `rigids_t` | `[B, N, 7]` | Starting SE(3) frames that IpaScore iteratively refines |
-| `res_mask` | `[B, N]` | Gates node/edge embeddings; zeroes masked residue outputs |
-| `fixed_mask` | `[B, N]` | Controls which residues get frame updates (all zeros → all free) |
-| `seq_idx` | `[B, N]` | Positional index embedding in Embedder |
-| `t` | `[B]` | Timestep sinusoidal embedding in Embedder; also used inside `calc_rot_score` / `calc_trans_score` |
-| `sc_ca_t` | `[B, N, 3]` | Self-conditioning CA positions fed to Embedder (zeros on first pass) |
-| `torsion_angles_sin_cos` | `[B, N, 7, 2]` | `[..., 2, :]` (ψ only) — blended with predicted ψ for fixed residues (no-op here since `fixed_mask=0`) |
-
-The loss additionally reads `rot_score`, `trans_score`, `rot_score_scaling`, `trans_score_scaling`, and `res_mask`.
-
-Keys produced by the dataset but **not consumed during training**:
-`rigids_0`, `atom14_pos`, `atom37_pos`, `aatype`, `chain_idx`, `residue_index`,
-`residx_atom14_to_atom37`, `atom37_mask`, `centroid`, `coord_scale`, `name`, `frame_indices`
-— retained for inference and evaluation (RMSD, coordinate unscaling, etc.).
-
----
-
-### 6. Loss (SE3Module)
-
-All three terms are computed only over visible residues (`res_mask = 1`):
-
-```python
-n_visible = mask.sum()
-
-# Rotation: scale-normalised MSE on SO(3) score vectors
-rot_loss = Σ_visible  ||pred_rot_score / rot_scaling - gt_rot_score / rot_scaling||²  / n_visible
-
-# Translation: scale-normalised MSE on R³ score vectors
-trans_loss = Σ_visible  ||pred_trans_score / trans_scaling - gt_trans_score / trans_scaling||²  / n_visible
-
-# Psi torsion: sin/cos MSE (unit-normalised by TorsionAngles layer)
-psi_loss = Σ_visible  ||pred_psi - gt_psi||²  / n_visible   # gt_psi = torsion_angles_sin_cos[..., 2, :]
-
-total_loss = rot_weight * rot_loss + trans_weight * trans_loss + psi_weight * psi_loss
-```
-
-Scale normalisation (`rot_score_scaling`, `trans_score_scaling`) equalises the
-loss magnitude across different noise levels t.
-
-**Logged metrics:** `train_loss`, `train_rot_loss`, `train_trans_loss`,
-`train_psi_loss`, and their `val_*` equivalents.
 
 ---
 
 ## Quick Start
 
-### Training (CLI)
+### Training
 
 ```bash
-python gen_model/simple_train.py \
-  --data_dir data \
-  --atlas_csv gen_model/splits/atlas.csv \
-  --train_split gen_model/splits/frame_splits.csv \
-  --suffix _latent \
-  --batch_size 8 \
-  --epochs 100 \
-  --lr 1e-4 \
-  --save_dir checkpoints/se3
+# Unconditional (generate conformations from noise)
+python gen_model/train_unconditional.py \
+    --protein 4o66_C --replica 1 --data_dir data
+
+# Conditional (autoregressive trajectory generation)
+python gen_model/train_conditional.py \
+    --protein 4o66_C --replica 1 --data_dir data
 ```
 
-### Training (notebook)
+### Inference
 
-Open `colab_single_protein_ddpm.ipynb`. The key config knobs are in cell 7
-(`protein_config`). Run all cells sequentially.
+```bash
+# Unconditional: 100 i.i.d. samples
+python gen_model/inference_unconditional.py \
+    --checkpoint checkpoints/unconditional/4o66_C/last.ckpt \
+    --npy_path data/4o66_C/4o66_C_R1_latent.npy \
+    --protein_name 4o66_C --num_samples 100
 
-### Usage in code
-
-```python
-from omegaconf import OmegaConf
-from gen_model.dataset import MDGenDataset
-from gen_model.diffusion.se3_diffuser import SE3Diffuser
-from gen_model.simple_train import SE3Module
-
-se3_conf = OmegaConf.create({...})    # see simple_train.py main() for defaults
-model_conf = OmegaConf.create({...})  # see simple_train.py main() for defaults
-
-diffuser = SE3Diffuser(se3_conf)
-
-train_dataset = MDGenDataset(args=data_args, diffuser=diffuser, mode='train')
-val_dataset   = MDGenDataset(args=data_args, diffuser=diffuser, mode='val')
-val_dataset.coord_scale = float(train_dataset.coord_scale)
-
-model = SE3Module(model_conf=model_conf, se3_conf=se3_conf, lr=1e-4)
+# Conditional: 250-frame trajectory (ATLAS protocol)
+python gen_model/inference_conditional.py \
+    --checkpoint checkpoints/conditional/4o66_C/last.ckpt \
+    --data_dir data --protein 4o66_C --total_frames 250
 ```
+
+### Evaluation
+
+```bash
+# Evaluate against all 3 replicas
+python gen_model/evaluate.py \
+    --ref_npy data/4o66_C/4o66_C_R{1,2,3}_latent.npy \
+    --gen_traj outputs/conditional/4o66_C/traj.pt \
+    --protein 4o66_C --mode conditional
+```
+
+### Colab Notebooks
+
+- `colab_train_unconditional.ipynb` — full pipeline: train → generate → evaluate → generalization test → MDGen baselines
+- `colab_train_conditional.ipynb` — same, with STAR-MD conditional training
 
 ---
 
-## Key Configuration
+## Evaluation Metrics
 
-### SE3Diffuser (`se3_conf`)
+Following MDGen's analysis pipeline (`extern/mdgen/scripts/analyze_peptide_sim.py`):
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `diffuse_rot` | `True` | Enable SO(3) rotation diffusion |
-| `diffuse_trans` | `True` | Enable R³ translation diffusion |
-| `so3.schedule` | `logarithmic` | Sigma schedule for IGSO(3) |
-| `so3.min_sigma` | `0.1` | Minimum rotation noise level |
-| `so3.max_sigma` | `1.5` | Maximum rotation noise level |
-| `r3.min_b` | `0.1` | VP-SDE β start |
-| `r3.max_b` | `20.0` | VP-SDE β end |
-| `r3.coordinate_scaling` | `0.1` | Ångström → normalised units |
+| Metric | What it measures | Applies to |
+|--------|-----------------|------------|
+| **Torsion JSD** | Jensen-Shannon divergence on backbone (φ/ψ/ω) and sidechain (χ1-4) dihedral distributions | Both |
+| **2D φ-ψ JSD** | Joint phi-psi distribution divergence | Both |
+| **TICA JSD** | Divergence in time-lagged independent component space (slow collective motions) | Both |
+| **Autocorrelation** | Temporal decorrelation of torsion angles and TICA components | Conditional only |
 
-### ScoreNetwork (`model_conf`)
+Evaluation defaults follow the ATLAS protocol: 250-frame trajectories
+(conditional) or 100 i.i.d. samples (unconditional), compared against
+all 3 reference MD replicas.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `node_embed_size` | `256` | Single representation dim (= `ipa.c_s`) |
-| `edge_embed_size` | `128` | Pair representation dim (= `ipa.c_z`) |
-| `ipa.num_blocks` | `4` | Number of IPA + Transformer blocks |
-| `ipa.no_heads` | `12` | IPA attention heads |
-| `ipa.seq_tfmr_num_layers` | `2` | Transformer layers per block |
+---
 
-### Loss weights (`training`)
+## Extern Submodules
 
-| Key | Default | Controls |
-|-----|---------|---------|
-| `rot_loss_weight` | `1.0` | SO(3) score matching |
-| `trans_loss_weight` | `1.0` | R³ score matching |
-| `psi_loss_weight` | `1.0` | ψ torsion angle reconstruction |
+| Submodule | Purpose |
+|-----------|---------|
+| `extern/se3_diffusion` | SE(3) diffuser, IPA, Embedder, backbone reconstruction |
+| `extern/mdgen` | MDGen model/training/analysis (baseline + evaluation metrics) |
+| `extern/sinfusion` | SinFusion reference (training protocol design) |
+
+Initialize with: `git submodule update --init --recursive`
