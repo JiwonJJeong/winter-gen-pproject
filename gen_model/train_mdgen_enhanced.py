@@ -60,12 +60,15 @@ def spatial_crop_mask(ca_pos: torch.Tensor, mask: torch.Tensor,
         m = mask
 
     B, L, _ = ca.shape
-    k = max(1, int(L * crop_ratio))
 
     crop_mask = torch.ones_like(m)
     for b in range(B):
         valid = m[b].bool()
         n_valid = valid.sum().item()
+        # k is a fraction of *valid* residues, not the padded length.
+        # Using L here would make k > n_valid for most padded sequences,
+        # causing the crop to be silently skipped every time.
+        k = max(1, int(n_valid * crop_ratio))
         if n_valid <= k:
             continue
         # Random seed from valid residues
@@ -192,8 +195,12 @@ class EnhancedMDGenWrapper(NewMDGenWrapper):
                         # ca: [B, T, L, 3] → [B*T, L, 3]
                         B, T, L_res = ca.shape[:3]
                         ca_flat = ca.reshape(B * T, L_res, 3)
-                        dist = torch.cdist(ca_flat, ca_flat)  # [B*T, L, L]
-                        bias = -(dist / lay._spatial_sigma).pow(2)
+                        # Squared distances directly — avoids sqrt whose gradient
+                        # is undefined at zero (diagonal), which would NaN-poison
+                        # the backward pass via cdist.
+                        diff = ca_flat.unsqueeze(2) - ca_flat.unsqueeze(1)  # [B*T, L, L, 3]
+                        dist_sq = diff.pow(2).sum(-1)                        # [B*T, L, L]
+                        bias = -(dist_sq / lay._spatial_sigma ** 2)
                         num_heads = lay.mha_heads
                         # [B*T, L, L] → [B*T*H, L, L]
                         bias = bias.unsqueeze(1).expand(-1, num_heads, -1, -1)
@@ -230,9 +237,11 @@ class EnhancedMDGenWrapper(NewMDGenWrapper):
                 # Apply crop to loss_mask: zero out cropped residues
                 prep['loss_mask'] = prep['loss_mask'] * crop.unsqueeze(-1)
 
-        # Set CA positions on each layer for Gaussian spatial attention bias
-        if self.spatial_sigma > 0 and 'rigids' in prep:
-            ca = prep['rigids'].get_trans()  # [B, T, L, 3]
+        # Set CA positions on each layer for Gaussian spatial attention bias.
+        # Always update (including to None) so stale positions from the previous
+        # batch aren't used when rigids are absent.
+        if self.spatial_sigma > 0:
+            ca = prep['rigids'].get_trans() if 'rigids' in prep else None
             for layer in self.model.layers:
                 if hasattr(layer, '_ca_pos'):
                     layer._ca_pos = ca
