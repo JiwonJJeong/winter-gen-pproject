@@ -70,7 +70,8 @@ class StarIpaScore(IpaScore):
     # ------------------------------------------------------------------
 
     def forward(self, init_node_embed, edge_embed, input_feats,
-                frame_idx=None, cond=None, kv_caches=None):
+                frame_idx=None, cond=None, kv_caches=None,
+                update_kv_cache: bool = False):
         """
         Args:
             init_node_embed: [B, N, c_s]  or  [B, L, N, c_s]
@@ -173,6 +174,17 @@ class StarIpaScore(IpaScore):
                     kv_cache=cache_b, ca_pos=ca_pos)
                 node_embed = flat(nef + delta)     # residual → [B*L, N, c_s]
                 node_embed = node_embed * node_mask[..., None]
+
+                # Append new frame's K/V to the persistent cache when requested.
+                # Only done once per finalized frame, not during the denoising loop.
+                if update_kv_cache and kv_caches is not None:
+                    if kv_caches[b] is None:
+                        kv_caches[b] = {'k': new_kv_b['k'], 'v': new_kv_b['v']}
+                    else:
+                        kv_caches[b] = {
+                            'k': torch.cat([kv_caches[b]['k'], new_kv_b['k']], dim=2),
+                            'v': torch.cat([kv_caches[b]['v'], new_kv_b['v']], dim=2),
+                        }
 
             rigid_update = self.trunk[f'bb_update_{b}'](
                 node_embed * diffuse_mask[..., None])
