@@ -452,8 +452,11 @@ def main():
     if args.protein:
         data_args.pep_name = args.protein
 
+    # Pass split explicitly to atlas.csv so MDGenDataset never falls back to
+    # frame_splits.csv (whose name stems include the suffix, causing double-append).
+    # mode='all' with atlas.csv (no split columns) uses every available frame.
     ds = ConditionalMDGenDataset(
-        args=data_args, mode='all',
+        args=data_args, split=args.atlas_csv, mode='all',
         num_frames=args.num_frames,
         ns_per_stored_frame=args.delta_t,
     )
