@@ -170,6 +170,13 @@ class SpatioTemporalAttention(nn.Module):
         T_new = L * N
         H, D = self.num_heads, self.head_dim
 
+        # Causal mask enforces temporal order by linear tensor position (not by
+        # frame_idx value), so frames must arrive in chronological order.
+        assert (frame_idx[1:] >= frame_idx[:-1]).all(), (
+            "frame_idx must be non-decreasing — causal mask uses tensor position, "
+            "not frame_idx values, so out-of-order frames would silently break causality."
+        )
+
         # 1. AdaLN input normalisation conditioned on t and delta_t
         x = self.adaln(s_frames, cond)               # [B, L, N, c_s]
 

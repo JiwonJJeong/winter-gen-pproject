@@ -42,7 +42,7 @@ class AdaLN(nn.Module):
 
         # Zero-init the final linear in each MLP so the block starts as identity.
         nn.init.zeros_(self.gamma_mlp[-1].weight)
-        nn.init.ones_(self.gamma_mlp[-1].bias)   # γ = 1
+        nn.init.zeros_(self.gamma_mlp[-1].bias)   # γ offset = 0 → effective γ = 1 + 0 = 1
         nn.init.zeros_(self.beta_mlp[-1].weight)
         nn.init.zeros_(self.beta_mlp[-1].bias)   # β = 0
 
@@ -62,4 +62,6 @@ class AdaLN(nn.Module):
             gamma = gamma.unsqueeze(1)
             beta  = beta.unsqueeze(1)
 
-        return gamma * self.norm(x) + beta
+        # (1 + gamma) keeps the structural 1 outside the MLP so the scale can
+        # never flip sign regardless of how far gamma drifts during training.
+        return (1 + gamma) * self.norm(x) + beta
