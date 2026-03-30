@@ -343,7 +343,7 @@ class MDGenDataset(torch.utils.data.Dataset):
             'fixed_mask': torch.zeros(L),
 
             # Clean structure (t=0) — noise applied in forward()
-            'rigids_0': clean_rigids.to_tensor_7(),
+            'rigids_0': clean_rigids.to_tensor_7().float(),
             'atom37_pos': atom37[frame_idx],
             'atom14_pos': atom14_pos,
             'torsion_angles_sin_cos': torsions[frame_idx],
@@ -495,7 +495,7 @@ class ConditionalMDGenDataset(MDGenDataset):
                 rots=Rotation(rot_mats=frames_rigid._rots._rot_mats[l]),
                 trans=frames_rigid._trans[l],
             )
-            r7 = r.to_tensor_7()
+            r7 = r.to_tensor_7().float()  # eigh in rot_to_quat promotes to float64
             r7[..., 4:] = (r7[..., 4:] - centroid) * scale
             rigids_0_frames.append(r7)
         rigids_0 = torch.stack(rigids_0_frames, dim=0)  # [L, N, 7]
