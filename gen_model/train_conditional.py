@@ -83,6 +83,9 @@ def main():
     parser.add_argument('--early_stop_patience', type=int, default=0,
                         help='Stop if train_loss does not improve for this many epochs. '
                              '0 = disabled (default).')
+    parser.add_argument('--aux_t_threshold', type=float, default=0.25,
+                        help='Only apply backbone atom + distance matrix aux losses when t < this '
+                             '(paper: 0.25; raise to 0.5 for faster convergence)')
     parser.add_argument('--ckpt_path', type=str, default=None,
                         help='Resume from checkpoint (restores weights, optimizer, step counter)')
     parser.add_argument('--weights_only', action='store_true',
@@ -146,6 +149,7 @@ def main():
         max_t=args.max_t,
         cosine_T_max=args.max_steps,
         ema_decay=args.ema_decay,
+        aux_t_threshold=args.aux_t_threshold,
     )
 
     checkpoint_cb = ModelCheckpoint(
