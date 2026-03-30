@@ -305,14 +305,17 @@ def rollout(
         # Measure FLOPs on the first frame's first denoising step
         if frame_num == 1 and _flops_per_forward is None:
             try:
+                import warnings
                 from torch.profiler import profile, ProfilerActivity
                 _feats_probe = {k: v.clone() if isinstance(v, torch.Tensor) else v
                                 for k, v in input_feats.items()}
                 _feats_probe['t'] = torch.tensor([max_t], dtype=torch.float32, device=device)
-                with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
-                             with_flops=True, record_shapes=True) as prof:
-                    with torch.no_grad():
-                        model(_feats_probe)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+                                 with_flops=True, record_shapes=True) as prof:
+                        with torch.no_grad():
+                            model(_feats_probe)
                 if device != 'cpu':
                     torch.cuda.synchronize()
                 _flops_per_forward = sum(
@@ -450,7 +453,7 @@ def main():
         data_args.pep_name = args.protein
 
     ds = ConditionalMDGenDataset(
-        args=data_args, mode='val',
+        args=data_args, mode='all',
         num_frames=args.num_frames,
         ns_per_stored_frame=args.delta_t,
     )
