@@ -1,7 +1,7 @@
 """Utilities for converting SE(3) Rigid objects to atom-level protein structures.
 
 All three rigids_to_* functions accept either a single Rigid [N] or a list of
-Rigids [N] (as returned by the inference and video_extrapolation pipelines) and
+Rigids [N] (as returned by the inference pipelines) and
 return numpy arrays in Angstroms.
 
 Visualisation helpers

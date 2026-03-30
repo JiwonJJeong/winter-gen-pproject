@@ -263,9 +263,10 @@ def rollout(
         ctx_len   = min(frame_num, num_context - 1)
         ctx_noised = history_noised[-ctx_len:]   # list of [N,7], length ctx_len
 
-        # Noise-initialise the new target frame
-        target_init = _noise_rigids(
-            torch.zeros(N, 7, device=device), max_t, diffuser, mask_np)
+        # Noise-initialise the new target frame from identity rigid
+        identity7 = torch.zeros(N, 7, device=device)
+        identity7[:, 0] = 1.0  # valid unit quaternion [1,0,0,0]
+        target_init = _noise_rigids(identity7, max_t, diffuser, mask_np)
 
         window7 = torch.stack(ctx_noised + [target_init], dim=0)  # [L, N, 7]
         L_win   = window7.shape[0]
