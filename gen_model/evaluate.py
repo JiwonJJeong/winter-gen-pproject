@@ -92,7 +92,8 @@ def _load_ref_atom14(npy_path: str, split_csv: str = None,
 
 
 def _rigids_to_atom14(gen_path: str, ref_npy_path: str,
-                      atlas_csv: str, protein: str) -> tuple:
+                      atlas_csv: str, protein: str,
+                      coord_scale: float = 0.1) -> tuple:
     """Convert generated .pt ([T, N, 7] rigids) to atom14 [T, N, 14, 3].
 
     Extracts CA from the translation component and approximates other
@@ -105,11 +106,7 @@ def _rigids_to_atom14(gen_path: str, ref_npy_path: str,
     seqres = seq_df.loc[protein, 'seqres']
     aatype = np.array([restype_order[c] for c in seqres])
 
-    # Recover coord_scale from reference
     ref_arr = np.load(ref_npy_path).astype(np.float32)
-    ref_ca = ref_arr[:, :, 1, :]
-    ref_ca_centered = ref_ca - ref_ca.mean(axis=1, keepdims=True)
-    coord_scale = 1.0 / (np.std(ref_ca_centered) + 1e-8)
 
     # Unscale translations back to Angstroms
     ca_gen = traj[:, :, 4:7].numpy() / coord_scale
@@ -706,6 +703,8 @@ def main():
                         help='Max reference frames to write to PDB/XTC '
                              '(evenly subsampled). 0 = no limit.')
     parser.add_argument('--out_dir',    type=str, default='outputs/eval')
+    parser.add_argument('--coord_scale', type=float, default=0.1,
+                        help='Scale used during training (default 0.1); must match inference')
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -737,7 +736,8 @@ def main():
     print(f'Loading generated: {args.gen_traj}')
     if args.mode == 'conditional':
         gen_atom14, _ = _rigids_to_atom14(
-            args.gen_traj, first_ref_npy, args.atlas_csv, args.protein)
+            args.gen_traj, first_ref_npy, args.atlas_csv, args.protein,
+            coord_scale=args.coord_scale)
     else:
         gen_atom14, _ = _ca_samples_to_atom14(
             args.gen_traj, first_ref_npy, args.atlas_csv, args.protein)
