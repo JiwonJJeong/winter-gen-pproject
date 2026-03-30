@@ -323,10 +323,9 @@ def main():
     parser.add_argument('--data_dir',      type=str, default='data')
     parser.add_argument('--atlas_csv',     type=str, default='gen_model/splits/atlas.csv')
     parser.add_argument('--train_split',   type=str, default='gen_model/splits/atlas.csv')
-    parser.add_argument('--suffix',        type=str, default='',
-                        help='File suffix appended to trajectory names. Leave empty (default) '
-                             'when the split CSV already contains the suffix in the name stem '
-                             '(e.g. 4o66_C_R1_latent from download_and_prep --suffix _latent).')
+    parser.add_argument('--suffix',        type=str, default=None,
+                        help='File suffix for trajectory .npy files (e.g. "_latent"). '
+                             'Auto-detected from data_dir if not specified.')
     parser.add_argument('--protein',       type=str, default=None,
                         help='Protein name to seed from (uses first val frame)')
     parser.add_argument('--output',        type=str, default='generated_traj.pt')
@@ -376,10 +375,23 @@ def main():
     # Seed frame from first val sample
     from gen_model.data.dataset import ConditionalMDGenDataset
     from omegaconf import OmegaConf
+    import glob as _glob
+
+    # Auto-detect suffix: find any _R1*.npy for the protein and infer the suffix
+    suffix = args.suffix
+    if suffix is None and args.protein:
+        prot_dir = os.path.join(args.data_dir, args.protein)
+        candidates = _glob.glob(os.path.join(prot_dir, f'{args.protein}_R1*.npy'))
+        if candidates:
+            stem = os.path.splitext(os.path.basename(candidates[0]))[0]  # e.g. 4o66_C_R1_latent
+            suffix = stem[len(f'{args.protein}_R1'):]  # e.g. _latent
+            print(f'Auto-detected suffix: "{suffix}"')
+        else:
+            suffix = ''
 
     data_args = OmegaConf.create({
         'data_dir': args.data_dir, 'atlas_csv': args.atlas_csv,
-        'train_split': args.train_split, 'suffix': args.suffix,
+        'train_split': args.train_split, 'suffix': suffix,
         'frame_interval': None, 'crop_ratio': 1.0, 'min_t': 0.01,
         'ns_per_stored_frame': args.delta_t,
     })
