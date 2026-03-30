@@ -347,6 +347,10 @@ def run_analysis_deeptime(ref_dir: str, gen_dir: str, protein: str,
     results['JSD']['TICA-0,1'] = float(jensenshannon(ref_p.flatten(),
                                                        gen_p.flatten()))
 
+    # Store TICA projections for plotting
+    results['ref_tica'] = ref_tica[:, :2].astype(np.float32)
+    results['gen_tica'] = gen_tica[:, :2].astype(np.float32)
+
     # --- Decorrelation (torsion + TICA autocorrelation) ---
     if compute_decorr and mode == 'conditional':
         from statsmodels.tsa.stattools import acovf
@@ -485,6 +489,193 @@ def print_summary(pkl_path: str, mode: str, validity: dict = None):
     print('=' * 60)
 
 
+def plot_summary(pkl_path: str, out_dir: str, protein: str, mode: str):
+    """Generate and save evaluation plots from the results pickle.
+
+    Produces two figures saved as PNGs in out_dir:
+      eval_tica.png   — TICA 1D histogram + 2D landscape (ref vs gen) + JSD bar chart
+      eval_autocorr.png — mean backbone torsion autocorrelation + TICA-0 autocorrelation
+    """
+    import pickle
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+
+    with open(pkl_path, 'rb') as f:
+        all_results = pickle.load(f)
+
+    if protein not in all_results:
+        print(f'plot_summary: protein {protein} not in results')
+        return
+
+    results = all_results[protein]
+    jsd = results.get('JSD', {})
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # Figure 1: TICA landscapes + JSD bar chart                          #
+    # ------------------------------------------------------------------ #
+    has_tica = 'ref_tica' in results and 'gen_tica' in results
+    fig1, axes = plt.subplots(1, 4, figsize=(18, 4))
+
+    if has_tica:
+        ref_t = results['ref_tica']   # [T_ref, 2]
+        gen_t = results['gen_tica']   # [T_gen, 2]
+
+        t0_min = min(ref_t[:, 0].min(), gen_t[:, 0].min())
+        t0_max = max(ref_t[:, 0].max(), gen_t[:, 0].max())
+        t1_min = min(ref_t[:, 1].min(), gen_t[:, 1].min())
+        t1_max = max(ref_t[:, 1].max(), gen_t[:, 1].max())
+        bins1d  = np.linspace(t0_min, t0_max, 80)
+
+        # 1D TICA-0 distribution
+        ax = axes[0]
+        ax.hist(ref_t[:, 0], bins=bins1d, density=True,
+                alpha=0.6, color='steelblue', label='Reference')
+        ax.hist(gen_t[:, 0], bins=bins1d, density=True,
+                alpha=0.6, color='tomato',   label='Generated')
+        ax.set_xlabel('TICA-0')
+        ax.set_ylabel('Density')
+        ax.set_title(f'TICA-0  (JSD={jsd.get("TICA-0", float("nan")):.3f})')
+        ax.legend(fontsize=8)
+
+        # 2D free-energy landscape helper
+        def _fes(coords, t0_r, t1_r, bins=50):
+            H, xe, ye = np.histogram2d(coords[:, 0], coords[:, 1],
+                                       range=[[t0_r[0], t0_r[1]],
+                                              [t1_r[0], t1_r[1]]],
+                                       bins=bins, density=True)
+            H = np.maximum(H, 1e-10)
+            fes = -np.log(H)
+            fes -= fes.min()
+            cx = 0.5 * (xe[:-1] + xe[1:])
+            cy = 0.5 * (ye[:-1] + ye[1:])
+            return fes.T, cx, cy
+
+        t0_r = (t0_min, t0_max)
+        t1_r = (t1_min, t1_max)
+
+        fes_ref, cx, cy = _fes(ref_t, t0_r, t1_r)
+        fes_gen, _,  _  = _fes(gen_t, t0_r, t1_r)
+        vmax = max(fes_ref.max(), fes_gen.max())
+
+        for ax, fes, label in [(axes[1], fes_ref, 'Reference'),
+                               (axes[2], fes_gen, 'Generated')]:
+            im = ax.contourf(cx, cy, fes, levels=20,
+                             cmap='RdYlBu_r', vmin=0, vmax=vmax)
+            ax.set_xlabel('TICA-0')
+            ax.set_ylabel('TICA-1')
+            ax.set_title(f'FES — {label}')
+            plt.colorbar(im, ax=ax, label='–log p (kT)')
+    else:
+        for ax in axes[:3]:
+            ax.text(0.5, 0.5, 'TICA not available', ha='center', va='center',
+                    transform=ax.transAxes)
+
+    # JSD bar chart by torsion group
+    groups = {
+        'PHI': [v for k, v in jsd.items() if k.startswith('PHI_')],
+        'PSI': [v for k, v in jsd.items() if k.startswith('PSI_')],
+        'OMEGA': [v for k, v in jsd.items() if k.startswith('OMEGA_')],
+        'CHI1': [v for k, v in jsd.items() if k.startswith('CHI1_')],
+        'CHI2': [v for k, v in jsd.items() if k.startswith('CHI2_')],
+        'TICA': [v for k, v in jsd.items() if k.startswith('TICA')],
+    }
+    group_means = {k: float(np.mean(v)) for k, v in groups.items() if v}
+    ax = axes[3]
+    bars = ax.bar(group_means.keys(), group_means.values(),
+                  color=['#4878cf', '#6acc65', '#d65f5f',
+                         '#b47cc7', '#c4ad66', '#77bedb'][:len(group_means)])
+    ax.set_ylabel('Mean JSD')
+    ax.set_title('Torsion JSD by group')
+    ax.set_ylim(0, 1)
+    for bar, val in zip(bars, group_means.values()):
+        ax.text(bar.get_x() + bar.get_width() / 2, val + 0.02,
+                f'{val:.3f}', ha='center', va='bottom', fontsize=8)
+
+    fig1.suptitle(f'{protein} — TICA & JSD  ({mode})', fontsize=12)
+    fig1.tight_layout()
+    tica_path = os.path.join(out_dir, 'eval_tica.png')
+    fig1.savefig(tica_path, dpi=120, bbox_inches='tight')
+    plt.close(fig1)
+    print(f'Saved TICA plot → {tica_path}')
+
+    # ------------------------------------------------------------------ #
+    # Figure 2: Autocorrelation                                          #
+    # ------------------------------------------------------------------ #
+    if mode != 'conditional':
+        return tica_path
+
+    md_dec  = results.get('md_decorrelation',  {})
+    our_dec = results.get('our_decorrelation', {})
+    if not md_dec or not our_dec:
+        return tica_path
+
+    fig2, (ax_bb, ax_tica) = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Mean backbone torsion autocorrelation
+    bb_keys = [k for k in md_dec if k != 'tica' and
+               any(k.startswith(p) for p in ('PHI_', 'PSI_', 'OMEGA_'))]
+
+    if bb_keys:
+        ref_bb = np.array([md_dec[k].astype(np.float32) for k in bb_keys])
+        gen_bb = np.array([our_dec[k].astype(np.float32)
+                           for k in bb_keys if k in our_dec])
+
+        ref_mean = ref_bb.mean(axis=0)
+        gen_mean = gen_bb.mean(axis=0) if gen_bb.size else None
+
+        # Subsample lags for readability
+        max_show = 500
+        ref_lags = np.arange(len(ref_mean))
+        stride_r = max(1, len(ref_lags) // max_show)
+        ax_bb.plot(ref_lags[::stride_r], ref_mean[::stride_r],
+                   color='steelblue', lw=1.2, label='Reference MD')
+        if gen_mean is not None:
+            gen_lags = np.arange(len(gen_mean))
+            stride_g = max(1, len(gen_lags) // max_show)
+            ax_bb.plot(gen_lags[::stride_g], gen_mean[::stride_g],
+                       color='tomato', lw=1.2, label='Generated')
+        ax_bb.axhline(0, color='k', lw=0.5, ls='--')
+        ax_bb.set_xlabel('Lag (frames)')
+        ax_bb.set_ylabel('Autocorrelation')
+        ax_bb.set_title('Mean backbone torsion autocorrelation')
+        ax_bb.legend()
+        ax_bb.grid(True, alpha=0.3)
+
+    # TICA-0 autocorrelation
+    if 'tica' in md_dec:
+        ref_ac = md_dec['tica'].astype(np.float32)
+        gen_ac = our_dec.get('tica', np.array([])).astype(np.float32)
+
+        ref_lags = np.arange(len(ref_ac))
+        stride_r = max(1, len(ref_lags) // max_show)
+        ax_tica.plot(ref_lags[::stride_r], ref_ac[::stride_r],
+                     color='steelblue', lw=1.2, label='Reference MD')
+        if gen_ac.size:
+            gen_lags = np.arange(len(gen_ac))
+            stride_g = max(1, len(gen_lags) // max_show)
+            ax_tica.plot(gen_lags[::stride_g], gen_ac[::stride_g],
+                         color='tomato', lw=1.2, label='Generated')
+        ax_tica.axhline(0, color='k', lw=0.5, ls='--')
+        ax_tica.set_xlabel('Lag (frames)')
+        ax_tica.set_ylabel('Autocorrelation')
+        ax_tica.set_title('TICA-0 autocorrelation')
+        ax_tica.legend()
+        ax_tica.grid(True, alpha=0.3)
+
+    fig2.suptitle(f'{protein} — Autocorrelation  ({mode})', fontsize=12)
+    fig2.tight_layout()
+    autocorr_path = os.path.join(out_dir, 'eval_autocorr.png')
+    fig2.savefig(autocorr_path, dpi=120, bbox_inches='tight')
+    plt.close(fig2)
+    print(f'Saved autocorrelation plot → {autocorr_path}')
+
+    return tica_path
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -597,6 +788,9 @@ def main():
     )
 
     print_summary(pkl_path, args.mode, validity)
+
+    if not args.no_plot:
+        plot_summary(pkl_path, gen_traj_dir, args.protein, args.mode)
 
 
 if __name__ == '__main__':
