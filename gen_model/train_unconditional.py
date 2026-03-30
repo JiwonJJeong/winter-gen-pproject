@@ -54,6 +54,8 @@ def main():
                         help='DataLoader workers')
     parser.add_argument('--virtual_epoch_size', type=int, default=5000,
                         help='Virtual epoch size (SinFusion default: 5000; 0 = use real dataset size)')
+    parser.add_argument('--ckpt_path', type=str, default=None,
+                        help='Resume from checkpoint (restores weights, optimizer, step counter)')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -112,7 +114,7 @@ def main():
         gradient_clip_val=args.grad_clip,
         accumulate_grad_batches=args.accumulate_grad,
     )
-    trainer.fit(module, train_dataloaders=train_loader)
+    trainer.fit(module, train_dataloaders=train_loader, ckpt_path=args.ckpt_path)
 
 
 if __name__ == '__main__':
