@@ -43,6 +43,26 @@ import torch
 
 import gen_model.path_setup  # noqa: F401
 
+# Patch mdgen's batched_gather for numpy ≥1.24 compatibility.
+# Newer numpy requires tuple-indexing; list-indexing raises ValueError
+# ("inhomogeneous shape") when the index list contains mixed types
+# (torch tensors + slice objects).
+import torch as _torch
+import mdgen.tensor_utils as _mtu
+import mdgen.geometry as _mg
+def _batched_gather_fixed(data, inds, dim=0, no_batch_dims=0):
+    ranges = []
+    for i, s in enumerate(data.shape[:no_batch_dims]):
+        r = _torch.arange(s)
+        r = r.view(*(*((1,) * i), -1, *((1,) * (len(inds.shape) - i - 1))))
+        ranges.append(r)
+    remaining_dims = [slice(None) for _ in range(len(data.shape) - no_batch_dims)]
+    remaining_dims[dim - no_batch_dims if dim >= 0 else dim] = inds
+    ranges.extend(remaining_dims)
+    return data[tuple(ranges)]
+_mtu.batched_gather = _batched_gather_fixed
+_mg.batched_gather = _batched_gather_fixed
+
 from mdgen.utils import atom14_to_pdb
 from mdgen.residue_constants import restype_order
 
