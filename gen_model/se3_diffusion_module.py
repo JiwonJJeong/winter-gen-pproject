@@ -134,6 +134,13 @@ class SE3Diffusion(L.LightningModule):
         self.ema = EMA(model, decay=ema_decay) if ema_decay > 0 else None
         self._ema_backup = None
 
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        # Drop stale inv_freq keys from old checkpoints (now non-persistent).
+        checkpoint['state_dict'] = {
+            k: v for k, v in checkpoint['state_dict'].items()
+            if not k.endswith('.rope.inv_freq')
+        }
+
     # ------------------------------------------------------------------
     # SE3 forward marginal — analog of SinFusion's q_sample
     # ------------------------------------------------------------------
