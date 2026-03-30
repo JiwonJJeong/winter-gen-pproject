@@ -277,7 +277,7 @@ def main():
                         help='Training window size L (must match checkpoint)')
     parser.add_argument('--delta_t',       type=float, default=0.1,
                         help='Physical stride between frames (ns)')
-    parser.add_argument('--n_steps',       type=int, default=100)
+    parser.add_argument('--n_steps',       type=int, default=150)
     parser.add_argument('--min_t',         type=float, default=0.01)
     parser.add_argument('--max_t',         type=float, default=0.1)
     parser.add_argument('--lora_r',        type=int,   default=0)
