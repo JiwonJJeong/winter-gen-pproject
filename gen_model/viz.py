@@ -49,8 +49,9 @@ def viz_trajectory_pdb(pdb_path: str, title: str = ''):
 def _build_multimodel_pdb(ca_frames: list) -> str:
     """Build a multi-model PDB string with CA atoms and backbone CONECT records.
 
-    Each entry in ca_frames is [N, 3].  CONECT records connect consecutive
-    CA atoms so py3Dmol can render them as a chain (stick/line style).
+    Each entry in ca_frames is [N, 3].  CONECT records are written once after
+    all MODEL/ENDMDL blocks (standard PDB convention); py3Dmol reads them once
+    and reuses the topology for every animation frame.
     """
     lines = []
     N = ca_frames[0].shape[0]
@@ -61,10 +62,12 @@ def _build_multimodel_pdb(ca_frames: list) -> str:
                 f'ATOM  {j + 1:5d}  CA  ALA A{j + 1:4d}    '
                 f'{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           C  '
             )
-        # CONECT records: CA_j — CA_{j+1} for chain connectivity
-        for j in range(1, N):
-            lines.append(f'CONECT{j:5d}{j + 1:5d}')
         lines.append('ENDMDL')
+    # CONECT records after all models — standard PDB, required for CA-only chains
+    # since CA–CA distance (~3.8 Å) is beyond py3Dmol's auto-bond threshold.
+    for j in range(1, N):
+        lines.append(f'CONECT{j:5d}{j + 1:5d}')
+    lines.append('END')
     return '\n'.join(lines)
 
 
@@ -133,18 +136,19 @@ def _viz_ca(ca: np.ndarray, title: str):
 
         view = py3Dmol.view(width=720, height=480)
         view.addModelsAsFrames(pdb_str, 'pdb')
-        # Backbone sticks + CA spheres — gives a chain appearance without
-        # needing N/C atoms (those require full-atom reconstruction)
+        # Line traces the CA chain (uses CONECT records).
+        # CA spheres mark residue positions.
+        # 'spectrum' colours N-terminus blue → C-terminus red.
         view.setStyle({}, {
-            'stick': {'radius': 0.12, 'color': 'spectrum'},
-            'sphere': {'radius': 0.25, 'color': 'spectrum'},
+            'line':   {'linewidth': 3,    'colorscheme': 'spectrum'},
+            'sphere': {'radius': 0.18,    'colorscheme': 'spectrum'},
         })
-        view.setBackgroundColor('0xf0f0f0')
+        view.setBackgroundColor('0xeeeeee')
         view.zoomTo()
         # Loop animation at ~80 ms/frame
         view.animate({'loop': 'forward', 'interval': 80, 'reps': 0})
         print(f'Animated {n_anim} frames ({T} total) | '
-              f'colour gradient = N-terminus (blue) → C-terminus (red)')
+              f'colour = N-terminus (blue) → C-terminus (red)')
         view.show()
 
     except ImportError:
