@@ -177,7 +177,7 @@ def main():
         accelerator='auto', devices='auto',
         callbacks=callbacks,
         precision='bf16-mixed' if torch.cuda.is_available() else 32,
-        log_every_n_steps=100,
+        log_every_n_steps=args.accumulate_grad * 100,
         enable_progress_bar=True,
         gradient_clip_val=args.grad_clip,
         accumulate_grad_batches=args.accumulate_grad,
