@@ -168,7 +168,9 @@ def main():
         check_on_train_epoch_end=True,
     ) if args.early_stop_patience > 0 else None
 
-    callbacks = [checkpoint_cb]
+    from pytorch_lightning.callbacks import TQDMProgressBar
+    log_freq = args.accumulate_grad * 100
+    callbacks = [checkpoint_cb, TQDMProgressBar(refresh_rate=log_freq)]
     if early_stop_cb is not None:
         callbacks.append(early_stop_cb)
 
@@ -177,8 +179,7 @@ def main():
         accelerator='auto', devices='auto',
         callbacks=callbacks,
         precision='bf16-mixed' if torch.cuda.is_available() else 32,
-        log_every_n_steps=args.accumulate_grad * 100,
-        enable_progress_bar=True,
+        log_every_n_steps=log_freq,
         gradient_clip_val=args.grad_clip,
         accumulate_grad_batches=args.accumulate_grad,
     )

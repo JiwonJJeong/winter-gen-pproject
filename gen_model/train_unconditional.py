@@ -105,13 +105,14 @@ def main():
         filename='uncond-{step:06d}-{train_loss:.4f}',
         save_top_k=3, monitor='train_loss', mode='min', save_last=True,
     )
+    from pytorch_lightning.callbacks import TQDMProgressBar
+    log_freq = args.accumulate_grad * 100
     trainer = L.Trainer(
         max_steps=args.max_steps,
         accelerator='auto', devices='auto',
-        callbacks=[checkpoint_cb],
+        callbacks=[checkpoint_cb, TQDMProgressBar(refresh_rate=log_freq)],
         precision='bf16-mixed' if torch.cuda.is_available() else 32,
-        log_every_n_steps=args.accumulate_grad * 100,
-        enable_progress_bar=True,
+        log_every_n_steps=log_freq,
         gradient_clip_val=args.grad_clip,
         accumulate_grad_batches=args.accumulate_grad,
     )
