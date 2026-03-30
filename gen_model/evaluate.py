@@ -503,6 +503,9 @@ def main():
                         help='Which segment of reference to use')
     parser.add_argument('--no_plot',    action='store_true',
                         help='Skip plot generation')
+    parser.add_argument('--max_ref_frames', type=int, default=2000,
+                        help='Max reference frames to write to PDB/XTC '
+                             '(evenly subsampled). 0 = no limit.')
     parser.add_argument('--out_dir',    type=str, default='outputs/eval')
     args = parser.parse_args()
 
@@ -548,6 +551,13 @@ def main():
     gen_traj_dir = os.path.join(args.out_dir, 'gen')
     os.makedirs(ref_traj_dir, exist_ok=True)
     os.makedirs(gen_traj_dir, exist_ok=True)
+
+    # Subsample reference to avoid writing 30k-frame PDB files
+    T_ref = ref_atom14.shape[0]
+    if args.max_ref_frames > 0 and T_ref > args.max_ref_frames:
+        idx = np.round(np.linspace(0, T_ref - 1, args.max_ref_frames)).astype(int)
+        ref_atom14 = ref_atom14[idx]
+        print(f'  Subsampled reference: {T_ref} → {ref_atom14.shape[0]} frames')
 
     print('Writing reference PDB/XTC ...')
     _write_trajectory(ref_atom14, aatype, ref_traj_dir, args.protein)
