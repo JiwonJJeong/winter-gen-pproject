@@ -124,38 +124,23 @@ class StarIpaScore(IpaScore):
         curr_rigids = Rigid.from_tensor_7(torch.clone(init_frames))
         init_rigids = Rigid.from_tensor_7(init_frames)
 
-        # IPA Gaussian spatial bias (local_attn_sigma). 0 = disabled.
-        _ipa_cutoff_A = float(getattr(self._ipa_conf, 'local_attn_sigma', 0.0))
-        _coord_scale  = 1.0
-        if _ipa_cutoff_A > 0.0:
-            _cs = input_feats.get('coord_scale', None)
-            _coord_scale = float(_cs.float().mean()) if _cs is not None else 1.0
-
-        # Sequence transformer Gaussian bias (seq_tfmr_sigma). 0 = disabled.
-        # Only used when STAR-MD is disabled (upstream SeqTransformer path).
-        _seq_cutoff    = float(getattr(self._ipa_conf, 'seq_tfmr_sigma', 0.0))
+        # Sequence transformer Gaussian bias (only when STAR-MD is disabled).
         _seq_tfmr_mask = None
-        if _seq_cutoff > 0.0 and not self._star_enabled:
-            num_res = node_mask.shape[-1]
-            idx = torch.arange(num_res, device=node_mask.device, dtype=torch.float32)
-            seq_dist = torch.abs(idx.unsqueeze(0) - idx.unsqueeze(1))  # [N, N]
-            _seq_tfmr_mask = -(2.0 * seq_dist / _seq_cutoff) ** 2
+        if not self._star_enabled:
+            _seq_cutoff = float(getattr(self._ipa_conf, 'seq_tfmr_sigma', 0.0))
+            if _seq_cutoff > 0.0:
+                num_res = node_mask.shape[-1]
+                idx = torch.arange(num_res, device=node_mask.device, dtype=torch.float32)
+                seq_dist = torch.abs(idx.unsqueeze(0) - idx.unsqueeze(1))
+                _seq_tfmr_mask = -(2.0 * seq_dist / _seq_cutoff) ** 2
 
         # ── Main trunk ────────────────────────────────────────────────────
         init_node_embed = init_node_embed * node_mask[..., None]
         node_embed      = init_node_embed * node_mask[..., None]
 
         for b in range(self._ipa_conf.num_blocks):
-            # Gaussian spatial bias recomputed each block as frames are refined.
-            local_mask = None
-            if _ipa_cutoff_A > 0.0:
-                ca   = curr_rigids.get_trans()
-                dist = torch.norm(ca.unsqueeze(-2) - ca.unsqueeze(-3), dim=-1)
-                local_mask = -(2.0 * dist / (_ipa_cutoff_A * _coord_scale)) ** 2
-
             ipa_embed = self.trunk[f'ipa_{b}'](
-                node_embed, edge_embed, curr_rigids, node_mask,
-                local_mask=local_mask)
+                node_embed, edge_embed, curr_rigids, node_mask)
             ipa_embed *= node_mask[..., None]
             node_embed = self.trunk[f'ipa_ln_{b}'](node_embed + ipa_embed)
 
