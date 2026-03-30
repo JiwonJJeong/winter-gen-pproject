@@ -317,8 +317,8 @@ class MDGenDataset(torch.utils.data.Dataset):
             # Use openfold data transforms for proper atom14/atom37 handling
             chain_feats = {
                 'aatype': aatype_tensor,
-                'all_atom_positions': atom37[frame_idx].double(),
-                'all_atom_mask': (atom37[frame_idx] != 0).any(dim=-1).double()
+                'all_atom_positions': atom37[frame_idx].float(),
+                'all_atom_mask': (atom37[frame_idx] != 0).any(dim=-1).float()
             }
             chain_feats = data_transforms.make_atom14_masks(chain_feats)
             chain_feats = data_transforms.make_atom14_positions(chain_feats)
