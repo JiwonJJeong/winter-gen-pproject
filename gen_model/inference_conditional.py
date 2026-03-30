@@ -273,7 +273,7 @@ def main():
     parser.add_argument('--output',        type=str, default='generated_traj.pt')
     parser.add_argument('--total_frames',  type=int, default=250,
                         help='Number of frames to generate (ATLAS default: 250)')
-    parser.add_argument('--num_frames',    type=int, default=16,
+    parser.add_argument('--num_frames',    type=int, default=8,
                         help='Training window size L (must match checkpoint)')
     parser.add_argument('--delta_t',       type=float, default=0.1,
                         help='Physical stride between frames (ns)')
@@ -284,7 +284,7 @@ def main():
                         help='Coordinate scale used during training (default 0.1 per paper)')
     parser.add_argument('--lora_r',        type=int,   default=0)
     parser.add_argument('--lora_alpha',    type=float, default=0.0)
-    parser.add_argument('--st_num_heads',  type=int,   default=4)
+    parser.add_argument('--st_num_heads',  type=int,   default=8)
     parser.add_argument('--device',        type=str,
                         default='cuda' if torch.cuda.is_available() else 'cpu')
     args = parser.parse_args()
