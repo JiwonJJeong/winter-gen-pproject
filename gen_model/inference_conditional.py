@@ -280,6 +280,8 @@ def main():
     parser.add_argument('--n_steps',       type=int, default=150)
     parser.add_argument('--min_t',         type=float, default=0.01)
     parser.add_argument('--max_t',         type=float, default=0.1)
+    parser.add_argument('--coord_scale',   type=float, default=0.1,
+                        help='Coordinate scale used during training (default 0.1 per paper)')
     parser.add_argument('--lora_r',        type=int,   default=0)
     parser.add_argument('--lora_alpha',    type=float, default=0.0)
     parser.add_argument('--st_num_heads',  type=int,   default=4)
@@ -301,14 +303,20 @@ def main():
     score_network = StarScoreNetwork(model_conf, diffuser)
     apply_lora(score_network, model_conf.lora)
 
-    # Load checkpoint — strip Lightning 'model.' prefix and drop stale
-    # non-persistent buffers (e.g. rope.inv_freq from old checkpoints).
-    ckpt  = torch.load(args.checkpoint, map_location='cpu')
-    state = ckpt.get('state_dict', ckpt)
-    state = {k[len('model.'):]: v for k, v in state.items() if k.startswith('model.')}
-    # Remove inv_freq entries: they are now non-persistent and recomputed
-    # from head_dim at __init__ time, so stale sizes cause no harm.
-    state = {k: v for k, v in state.items() if not k.endswith('.rope.inv_freq')}
+    # Load checkpoint — prefer EMA shadow weights when available.
+    ckpt = torch.load(args.checkpoint, map_location='cpu')
+    if 'ema_shadow' in ckpt:
+        # EMA shadow keys are already unprefixed (relative to self.model)
+        state = {k: v for k, v in ckpt['ema_shadow'].items()
+                 if not k.endswith('.rope.inv_freq')}
+        print('Loading EMA weights from checkpoint.')
+    else:
+        state = ckpt.get('state_dict', ckpt)
+        state = {k[len('model.'):]: v for k, v in state.items()
+                 if k.startswith('model.')}
+        state = {k: v for k, v in state.items()
+                 if not k.endswith('.rope.inv_freq')}
+        print('Warning: no EMA weights in checkpoint, using raw state_dict.')
     score_network.load_state_dict(state, strict=False)
     score_network.eval().to(device)
 
@@ -343,12 +351,12 @@ def main():
         trans=frames_out._trans[0],
     )
     r7 = rigid0.to_tensor_7()
-    # Centre and scale (match training: coord_scale = 1/std of CA coords)
-    ca0      = torch.from_numpy(frame0[0, :, 1, :])         # [N, 3]
-    centroid = ca0.mean(dim=0, keepdim=True)
-    ca_std   = ca0.std().item()
-    coord_scale = 1.0 / (ca_std + 1e-8)
+    # Centre and scale translations to match training coord_scale.
+    ca0         = torch.from_numpy(frame0[0, :, 1, :])   # [N, 3]
+    centroid    = ca0.mean(dim=0, keepdim=True)
+    coord_scale = args.coord_scale
     r7[..., 4:] = (r7[..., 4:] - centroid) * coord_scale
+    print(f'coord_scale : {coord_scale} (--coord_scale)')
 
     seed_rigids = r7.to(device)                              # [N, 7]
     seq_idx     = torch.arange(1, N_res + 1, device=device) # [N]
