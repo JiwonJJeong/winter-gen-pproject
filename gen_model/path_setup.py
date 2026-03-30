@@ -39,9 +39,35 @@ def _patch_rot_to_quat():
     def _fixed_rot_to_quat(rot):
         import torch
         result = _orig(rot)
-        # k inherits dtype from rot entries; eigh may promote it
+        # eigh may promote float32 → float64; cast back to input dtype
         return result.to(rot.dtype if isinstance(rot, torch.Tensor) else result.dtype)
 
     _of_ru.rot_to_quat = _fixed_rot_to_quat
 
 _patch_rot_to_quat()
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch SO3Diffuser.torch_score to fix Float/Double mismatch.
+#
+# torch_score creates sigma via torch.tensor(numpy_float64) — always Double.
+# omega is derived from the model (Float).  When igso3_expansion mixes them,
+# the autograd graph records Double ops but the loss gradient is Float, causing:
+#   RuntimeError: Found dtype Float but expected Double
+#
+# Fix: run torch_score in Double (matching sigma), cast result back to Float.
+# The .double()/.to() boundary is transparent to autograd.
+# ---------------------------------------------------------------------------
+def _patch_so3_torch_score():
+    import torch
+    from data import so3_diffuser as _so3
+
+    _orig = _so3.SO3Diffuser.torch_score
+
+    def _fixed_torch_score(self, vec, t, eps=1e-6):
+        result = _orig(self, vec.double(), t, eps)
+        return result.to(vec.dtype)
+
+    _so3.SO3Diffuser.torch_score = _fixed_torch_score
+
+_patch_so3_torch_score()
