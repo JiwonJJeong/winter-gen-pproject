@@ -73,20 +73,15 @@ def main():
     data_args  = default_data_args(args)
     diffuser   = SE3Diffuser(se3_conf)
 
-    # Datasets — no diffuser passed: noise is applied in SE3Diffusion.forward()
+    # Dataset — use all frames (SinFusion-style: no train/val split within one trajectory).
+    # Evaluation is done post-hoc against held-out replicas via evaluate.py.
     train_dataset = MDGenDataset(
-        args=data_args, mode='train',
+        args=data_args, mode='all',
         virtual_epoch_size=args.virtual_epoch_size,
     )
-    val_dataset = MDGenDataset(args=data_args, mode='val')
-    val_dataset.coord_scale = float(train_dataset.coord_scale)
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True, persistent_workers=args.num_workers > 0,
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, pin_memory=True, persistent_workers=args.num_workers > 0,
     )
 
@@ -104,8 +99,8 @@ def main():
 
     checkpoint_cb = ModelCheckpoint(
         dirpath=args.save_dir,
-        filename='uncond-{step:06d}-{val_loss:.4f}',
-        save_top_k=3, monitor='val_loss', mode='min', save_last=True,
+        filename='uncond-{step:06d}-{train_loss:.4f}',
+        save_top_k=3, monitor='train_loss', mode='min', save_last=True,
     )
     trainer = L.Trainer(
         max_steps=args.max_steps,
@@ -116,7 +111,7 @@ def main():
         gradient_clip_val=args.grad_clip,
         accumulate_grad_batches=args.accumulate_grad,
     )
-    trainer.fit(module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.fit(module, train_dataloaders=train_loader)
 
 
 if __name__ == '__main__':
