@@ -323,7 +323,10 @@ def main():
     parser.add_argument('--data_dir',      type=str, default='data')
     parser.add_argument('--atlas_csv',     type=str, default='gen_model/splits/atlas.csv')
     parser.add_argument('--train_split',   type=str, default='gen_model/splits/atlas.csv')
-    parser.add_argument('--suffix',        type=str, default='_latent')
+    parser.add_argument('--suffix',        type=str, default='',
+                        help='File suffix appended to trajectory names. Leave empty (default) '
+                             'when the split CSV already contains the suffix in the name stem '
+                             '(e.g. 4o66_C_R1_latent from download_and_prep --suffix _latent).')
     parser.add_argument('--protein',       type=str, default=None,
                         help='Protein name to seed from (uses first val frame)')
     parser.add_argument('--output',        type=str, default='generated_traj.pt')
