@@ -78,8 +78,14 @@ def main():
                         help='Enable SinFusion-style curriculum for delta_t range')
     parser.add_argument('--no_curriculum',       dest='curriculum', action='store_false',
                         help='Disable curriculum learning')
+    parser.add_argument('--early_stop_patience', type=int, default=0,
+                        help='Stop if train_loss does not improve for this many epochs. '
+                             '0 = disabled (default).')
     parser.add_argument('--ckpt_path', type=str, default=None,
                         help='Resume from checkpoint (restores weights, optimizer, step counter)')
+    parser.add_argument('--weights_only', action='store_true',
+                        help='Load only weights from --ckpt_path (fresh optimizer + scheduler). '
+                             'Use when resuming with a larger max_steps to avoid dead LR.')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -120,6 +126,16 @@ def main():
     score_network = StarScoreNetwork(model_conf, diffuser)
     apply_lora(score_network, model_conf.lora)
 
+    if args.weights_only and args.ckpt_path:
+        ckpt = torch.load(args.ckpt_path, map_location='cpu')
+        state = ckpt.get('ema_shadow') or {
+            k[len('model.'):]: v for k, v in ckpt.get('state_dict', {}).items()
+            if k.startswith('model.')
+        }
+        state = {k: v for k, v in state.items() if not k.endswith('.rope.inv_freq')}
+        score_network.load_state_dict(state, strict=False)
+        print(f'Loaded weights from {args.ckpt_path} (fresh optimizer/scheduler)')
+
     module = ConditionalSE3Diffusion(
         model=score_network,
         diffuser=diffuser,
@@ -135,17 +151,30 @@ def main():
         filename='cond-{step:06d}-{train_loss:.4f}',
         save_top_k=3, monitor='train_loss', mode='min', save_last=True,
     )
+    early_stop_cb = L.callbacks.EarlyStopping(
+        monitor='train_loss',
+        patience=args.early_stop_patience,
+        mode='min',
+        verbose=True,
+        check_on_train_epoch_end=True,
+    ) if args.early_stop_patience > 0 else None
+
+    callbacks = [checkpoint_cb]
+    if early_stop_cb is not None:
+        callbacks.append(early_stop_cb)
+
     trainer = L.Trainer(
         max_steps=args.max_steps,
         accelerator='auto', devices='auto',
-        callbacks=[checkpoint_cb],
+        callbacks=callbacks,
         precision='16-mixed' if torch.cuda.is_available() else 32,
         log_every_n_steps=500,
         enable_progress_bar=False,
         gradient_clip_val=args.grad_clip,
         accumulate_grad_batches=args.accumulate_grad,
     )
-    trainer.fit(module, train_dataloaders=train_loader, ckpt_path=args.ckpt_path)
+    resume_ckpt = None if args.weights_only else args.ckpt_path
+    trainer.fit(module, train_dataloaders=train_loader, ckpt_path=resume_ckpt)
 
 
 if __name__ == '__main__':
