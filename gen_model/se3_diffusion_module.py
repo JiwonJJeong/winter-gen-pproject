@@ -307,25 +307,35 @@ class SE3Diffusion(L.LightningModule):
         has_aux = aux_t_mask.sum() > 0 and self.aux_weight > 0
 
         if has_aux and 'atom37' in pred and 'atom37_pos' in batch:
+            # Upstream uses loss_mask = bb_mask * diffuse_mask so fixed residues
+            # don't contribute to auxiliary losses.
+            diffuse_mask = (1 - batch['fixed_mask'].float()) * mask  # [B, N]
+
             # Backbone atom position loss
             pred_bb = pred['atom37']        # [B, N, 37, 3] (single-frame only)
             gt_bb   = batch['atom37_pos'].float()
             bb_mask = (gt_bb.abs().sum(-1) > 1e-6).float()  # [B, N, 37]
             bb_mse  = ((pred_bb - gt_bb) ** 2).sum(-1)      # [B, N, 37]
-            bb_loss = (bb_mse * bb_mask * mask[..., None]).sum() / (bb_mask.sum() + 1e-8)
-            bb_loss = bb_loss * aux_t_mask.mean()  # scale by fraction of samples below threshold
+            aux_res_mask = (diffuse_mask * mask)[..., None]  # [B, N, 1]
+            bb_loss = (bb_mse * bb_mask * aux_res_mask).sum() / (bb_mask.sum() + 1e-8)
+            bb_loss = bb_loss * aux_t_mask.mean()
             total = total + self.aux_weight * self.bb_atom_weight * bb_loss
 
-            # Distance matrix loss (pairwise CA-CA)
+            # Distance matrix loss (pairwise CA-CA, local contacts only).
+            # Use safe euclidean distances (eps inside sqrt) to match upstream
+            # semantics while avoiding the NaN gradient that cdist has at zero.
             pred_ca = pred_bb[:, :, 1, :]  # [B, N, 3] — CA is index 1 in atom37
             gt_ca   = gt_bb[:, :, 1, :]
-            # Squared distances directly (avoids sqrt gradient NaN at zero).
-            def _sq_dist(x):
-                d = x.unsqueeze(2) - x.unsqueeze(1)   # [B, N, N, 3]
-                return d.pow(2).sum(-1)                # [B, N, N]
-            pred_dist = _sq_dist(pred_ca)
-            gt_dist   = _sq_dist(gt_ca)
-            dist_mask = mask[:, :, None] * mask[:, None, :]  # [B, N, N]
+            def _safe_dist(x):
+                d = x.unsqueeze(2) - x.unsqueeze(1)        # [B, N, N, 3]
+                return torch.sqrt(d.pow(2).sum(-1) + 1e-8)  # [B, N, N] euclidean
+            pred_dist = _safe_dist(pred_ca)
+            gt_dist   = _safe_dist(gt_ca)
+            dist_mask = diffuse_mask[:, :, None] * mask[:, None, :]  # [B, N, N]
+            # Restrict to local contacts (<6 Å) matching upstream; distant pairs
+            # would otherwise dominate given the quadratic number of long-range pairs.
+            proximity_mask = (gt_dist < 6.0).float()
+            dist_mask = dist_mask * proximity_mask
             dist_mse  = ((pred_dist - gt_dist) ** 2 * dist_mask).sum() / (dist_mask.sum() + 1e-8)
             dist_mse  = dist_mse * aux_t_mask.mean()
             total = total + self.aux_weight * self.dist_mat_weight * dist_mse
