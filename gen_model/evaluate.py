@@ -636,6 +636,8 @@ def plot_summary(pkl_path: str, out_dir: str, protein: str, mode: str,
     bb_keys = [k for k in md_dec if k != 'tica' and
                any(k.startswith(p) for p in ('PHI_', 'PSI_', 'OMEGA_'))]
 
+    max_show = 500
+
     if bb_keys:
         ref_bb = np.array([md_dec[k].astype(np.float32) for k in bb_keys])
         gen_bb = np.array([our_dec[k].astype(np.float32)
@@ -644,19 +646,18 @@ def plot_summary(pkl_path: str, out_dir: str, protein: str, mode: str,
         ref_mean = ref_bb.mean(axis=0)
         gen_mean = gen_bb.mean(axis=0) if gen_bb.size else None
 
-        # Subsample lags for readability
-        max_show = 500
-        ref_lags = np.arange(len(ref_mean))
-        stride_r = max(1, len(ref_lags) // max_show)
-        ax_bb.plot(ref_lags[::stride_r], ref_mean[::stride_r],
+        # Convert lag frames → ns so both axes are in physical time
+        ref_lags_ns = np.arange(len(ref_mean)) * ref_dt_ns
+        stride_r = max(1, len(ref_lags_ns) // max_show)
+        ax_bb.plot(ref_lags_ns[::stride_r], ref_mean[::stride_r],
                    color='steelblue', lw=1.2, label='Reference MD')
         if gen_mean is not None:
-            gen_lags = np.arange(len(gen_mean))
-            stride_g = max(1, len(gen_lags) // max_show)
-            ax_bb.plot(gen_lags[::stride_g], gen_mean[::stride_g],
+            gen_lags_ns = np.arange(len(gen_mean)) * gen_dt_ns
+            stride_g = max(1, len(gen_lags_ns) // max_show)
+            ax_bb.plot(gen_lags_ns[::stride_g], gen_mean[::stride_g],
                        color='tomato', lw=1.2, label='Generated')
         ax_bb.axhline(0, color='k', lw=0.5, ls='--')
-        ax_bb.set_xlabel('Lag (frames)')
+        ax_bb.set_xlabel('Lag (ns)')
         ax_bb.set_ylabel('Autocorrelation')
         ax_bb.set_title('Mean backbone torsion autocorrelation')
         ax_bb.legend()
@@ -667,17 +668,17 @@ def plot_summary(pkl_path: str, out_dir: str, protein: str, mode: str,
         ref_ac = md_dec['tica'].astype(np.float32)
         gen_ac = our_dec.get('tica', np.array([])).astype(np.float32)
 
-        ref_lags = np.arange(len(ref_ac))
-        stride_r = max(1, len(ref_lags) // max_show)
-        ax_tica.plot(ref_lags[::stride_r], ref_ac[::stride_r],
+        ref_lags_ns = np.arange(len(ref_ac)) * ref_dt_ns
+        stride_r = max(1, len(ref_lags_ns) // max_show)
+        ax_tica.plot(ref_lags_ns[::stride_r], ref_ac[::stride_r],
                      color='steelblue', lw=1.2, label='Reference MD')
         if gen_ac.size:
-            gen_lags = np.arange(len(gen_ac))
-            stride_g = max(1, len(gen_lags) // max_show)
-            ax_tica.plot(gen_lags[::stride_g], gen_ac[::stride_g],
+            gen_lags_ns = np.arange(len(gen_ac)) * gen_dt_ns
+            stride_g = max(1, len(gen_lags_ns) // max_show)
+            ax_tica.plot(gen_lags_ns[::stride_g], gen_ac[::stride_g],
                          color='tomato', lw=1.2, label='Generated')
         ax_tica.axhline(0, color='k', lw=0.5, ls='--')
-        ax_tica.set_xlabel('Lag (frames)')
+        ax_tica.set_xlabel('Lag (ns)')
         ax_tica.set_ylabel('Autocorrelation')
         ax_tica.set_title('TICA-0 autocorrelation')
         ax_tica.legend()
