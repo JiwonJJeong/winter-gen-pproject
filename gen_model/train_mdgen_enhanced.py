@@ -145,13 +145,72 @@ class VirtualEpochDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 class EnhancedMDGenWrapper(NewMDGenWrapper):
-    """NewMDGenWrapper with SinFusion anti-overfitting applied."""
+    """NewMDGenWrapper with SinFusion anti-overfitting applied.
+
+    Additions over NewMDGenWrapper:
+      - Spatial cropping on loss mask (crop_ratio=0.95)
+      - Stratified noise sampling
+      - Gaussian spatial attention bias on mha_l (spatial_sigma)
+    """
 
     def __init__(self, args):
         super().__init__(args)
         self.crop_ratio = getattr(args, 'crop_ratio', 0.95)
+        self.spatial_sigma = getattr(args, 'spatial_sigma', 15.0)
         # Replace transport with stratified version
         self.transport = StratifiedTransportWrapper(self.transport)
+        # Monkey-patch spatial attention with Gaussian distance bias
+        if self.spatial_sigma > 0:
+            self._patch_spatial_attention()
+
+    def _patch_spatial_attention(self):
+        """Inject Gaussian distance bias into MDGen's mha_l (spatial attention).
+
+        MDGen's LatentMDGenLayer.forward() calls mha_l with (x, mask) — no way
+        to pass CA positions without modifying extern.  Instead, we store CA
+        positions on each layer object before the forward pass, and the patched
+        mha_l.forward reads them from the layer.
+
+        The patched forward computes CA-CA distance → Gaussian bias → additive
+        attn_mask in MultiheadAttention.
+        """
+        sigma = self.spatial_sigma
+
+        for layer in self.model.layers:
+            if not hasattr(layer, 'mha_l'):
+                continue
+            layer._spatial_sigma = sigma
+            layer._ca_pos = None  # set before each forward pass
+
+            original_forward = layer.mha_l.forward
+
+            def make_patched_forward(orig_fwd, lay):
+                def patched_forward(x, mask):
+                    # x: [B*T, L, C], mask: [B*T, L]
+                    ca = lay._ca_pos
+                    if ca is not None and lay._spatial_sigma > 0:
+                        # ca: [B, T, L, 3] → [B*T, L, 3]
+                        B, T, L_res = ca.shape[:3]
+                        ca_flat = ca.reshape(B * T, L_res, 3)
+                        dist = torch.cdist(ca_flat, ca_flat)  # [B*T, L, L]
+                        bias = -(dist / lay._spatial_sigma).pow(2)
+                        num_heads = lay.mha_heads
+                        # [B*T, L, L] → [B*T*H, L, L]
+                        bias = bias.unsqueeze(1).expand(-1, num_heads, -1, -1)
+                        bias = bias.reshape(B * T * num_heads, L_res, L_res)
+
+                        x_t = x.transpose(0, 1)
+                        x_t, _ = lay.mha_l.attn(
+                            query=x_t, key=x_t, value=x_t,
+                            key_padding_mask=1 - mask,
+                            attn_mask=bias)
+                        return x_t.transpose(0, 1)
+                    else:
+                        return orig_fwd(x, mask)
+                return patched_forward
+
+            layer.mha_l.forward = make_patched_forward(original_forward, layer)
+        print(f'Patched {len(self.model.layers)} mha_l layers with spatial_sigma={sigma}')
 
     def general_step(self, batch, stage='train'):
         self.iter_step += 1
@@ -170,6 +229,13 @@ class EnhancedMDGenWrapper(NewMDGenWrapper):
                 crop = spatial_crop_mask(ca, mask_for_crop, self.crop_ratio)
                 # Apply crop to loss_mask: zero out cropped residues
                 prep['loss_mask'] = prep['loss_mask'] * crop.unsqueeze(-1)
+
+        # Set CA positions on each layer for Gaussian spatial attention bias
+        if self.spatial_sigma > 0 and 'rigids' in prep:
+            ca = prep['rigids'].get_trans()  # [B, T, L, 3]
+            for layer in self.model.layers:
+                if hasattr(layer, '_ca_pos'):
+                    layer._ca_pos = ca
 
         start = time.time()
         out_dict = self.transport.training_losses(
@@ -208,6 +274,8 @@ def main():
     parser.add_argument('--epochs',      type=int, default=500)
     parser.add_argument('--crop_ratio',  type=float, default=0.95,
                         help='Spatial crop ratio (SinFusion: 0.95)')
+    parser.add_argument('--spatial_sigma', type=float, default=15.0,
+                        help='Gaussian spatial bias sigma for mha_l (0=disabled)')
     parser.add_argument('--virtual_epoch_size', type=int, default=5000)
     parser.add_argument('--num_frames',  type=int, default=250)
     our_args = parser.parse_args()
@@ -272,6 +340,7 @@ def main():
         frame_interval=None, cond_interval=None,
         # Our extras
         crop_ratio=our_args.crop_ratio,
+        spatial_sigma=our_args.spatial_sigma,
     )
 
     # Build datasets
@@ -310,6 +379,7 @@ def main():
 
     print(f'Training MDGen enhanced on {our_args.protein}_R{our_args.replica}')
     print(f'  SinFusion tricks: crop_ratio={our_args.crop_ratio}, '
+          f'spatial_sigma={our_args.spatial_sigma}, '
           f'virtual_epoch={our_args.virtual_epoch_size}, stratified_t=True, ema=True')
     print(f'  Save dir: {save_dir}')
 
