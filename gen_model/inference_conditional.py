@@ -25,6 +25,7 @@ Output:
 
 import argparse
 import os
+import time
 
 import numpy as np
 import torch
@@ -259,7 +260,13 @@ def rollout(
     history_clean  = [seed_rigids.to(device)]
     history_noised = [seed_rigids.to(device)]   # lightly noised context
 
+    # Performance tracking
+    _flops_per_forward = None   # measured once via torch.profiler on frame 1
+    _frame_times = []           # wall-clock seconds per frame (excluding frame 0)
+
     for frame_num in range(1, total_frames):
+        _t_frame_start = time.perf_counter()
+
         ctx_len   = min(frame_num, num_context - 1)
         ctx_noised = history_noised[-ctx_len:]   # list of [N,7], length ctx_len
 
@@ -295,6 +302,24 @@ def rollout(
             'torsion_angles_sin_cos': torch.zeros(1, L_win, N, 7, 2, device=device),
         }
 
+        # Measure FLOPs on the first frame's first denoising step
+        if frame_num == 1 and _flops_per_forward is None:
+            try:
+                from torch.profiler import profile, ProfilerActivity
+                _feats_probe = {k: v.clone() if isinstance(v, torch.Tensor) else v
+                                for k, v in input_feats.items()}
+                _feats_probe['t'] = torch.tensor([max_t], dtype=torch.float32, device=device)
+                with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+                             with_flops=True, record_shapes=True) as prof:
+                    with torch.no_grad():
+                        model(_feats_probe)
+                if device != 'cpu':
+                    torch.cuda.synchronize()
+                _flops_per_forward = sum(
+                    e.flops for e in prof.key_averages() if e.flops > 0)
+            except Exception:
+                _flops_per_forward = 0
+
         clean7 = reverse_diffuse(
             model, diffuser, input_feats,
             n_steps=n_steps, min_t=min_t, max_t=max_t, device=device)
@@ -307,8 +332,34 @@ def rollout(
         noised7 = _noise_rigids(clean7, tau, diffuser, mask_np)
         history_noised.append(noised7)
 
+        if device != 'cpu':
+            torch.cuda.synchronize()
+        _frame_times.append(time.perf_counter() - _t_frame_start)
+
         if frame_num % 10 == 0:
-            print(f'  generated frame {frame_num}/{total_frames}')
+            avg_s  = float(np.mean(_frame_times))
+            if _flops_per_forward and _flops_per_forward > 0:
+                # total FLOPs per frame = n_steps forward passes
+                tflops_per_frame = (_flops_per_forward * n_steps) / 1e12
+                tflops_per_s     = tflops_per_frame / avg_s
+                print(f'  frame {frame_num}/{total_frames} | '
+                      f'{avg_s:.2f}s/frame | '
+                      f'{tflops_per_frame:.3f} TFLOP/frame | '
+                      f'{tflops_per_s:.2f} TFLOP/s')
+            else:
+                print(f'  frame {frame_num}/{total_frames} | {avg_s:.2f}s/frame')
+
+    if _frame_times:
+        avg_s = float(np.mean(_frame_times))
+        total_s = float(np.sum(_frame_times))
+        print(f'\nPerformance summary:')
+        print(f'  Frames generated : {len(_frame_times)}')
+        print(f'  Total wall time  : {total_s:.1f}s')
+        print(f'  Avg per frame    : {avg_s:.2f}s')
+        if _flops_per_forward and _flops_per_forward > 0:
+            tflops_per_frame = (_flops_per_forward * n_steps) / 1e12
+            print(f'  TFLOP/frame      : {tflops_per_frame:.3f}')
+            print(f'  Avg TFLOP/s      : {tflops_per_frame / avg_s:.2f}')
 
     return history_clean
 
