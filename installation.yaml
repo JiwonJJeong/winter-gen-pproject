@@ -20,6 +20,7 @@ dependencies:
   - ipykernel
   - mdtraj
   - requests
+  - pyemma
   - pip:
     - pytorch-lightning
     - wandb
@@ -31,3 +32,7 @@ dependencies:
     - hydra-core
     - biotite
     - GPUtil
+    - statsmodels
+    - optuna
+    - py3Dmol
+    - huggingface-hub
