@@ -17,7 +17,7 @@ import os
 import argparse
 import pytorch_lightning as L
 
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('medium')
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 
