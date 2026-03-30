@@ -21,7 +21,7 @@ import torch.nn as nn
 import gen_model.path_setup  # noqa: F401  — adds extern/se3_diffusion to sys.path
 
 from model.ipa_pytorch import IpaScore
-from openfold.utils.rigid_utils import Rigid
+from gen_model.utils.rigid_utils import Rigid
 from gen_model.models.star_attention import SpatioTemporalAttention
 
 

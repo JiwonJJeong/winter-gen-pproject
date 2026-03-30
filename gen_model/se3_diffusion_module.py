@@ -25,7 +25,7 @@ import torch.nn.functional as F
 import pytorch_lightning as L
 
 import gen_model.path_setup  # noqa: F401 — adds extern/se3_diffusion to sys.path
-from openfold.utils.rigid_utils import Rigid
+from gen_model.utils.rigid_utils import Rigid
 
 
 # ---------------------------------------------------------------------------

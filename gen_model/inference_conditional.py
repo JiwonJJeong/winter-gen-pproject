@@ -30,7 +30,7 @@ import numpy as np
 import torch
 
 import gen_model.path_setup  # noqa: F401
-from openfold.utils.rigid_utils import Rigid
+from gen_model.utils.rigid_utils import Rigid
 
 from gen_model.train_base import default_se3_conf, default_model_conf
 from gen_model.models.star_score_network import StarScoreNetwork
