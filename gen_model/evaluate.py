@@ -291,6 +291,11 @@ def run_analysis_deeptime(ref_dir: str, gen_dir: str, protein: str,
     ref_ang, labels = _compute_torsions(ref_pdb, ref_xtc, cossin=False)
     gen_ang, _      = _compute_torsions(gen_pdb, gen_xtc, cossin=False)
 
+    # The generated trajectory has approximate backbone only (no sidechain beyond
+    # CB), so mdtraj may compute fewer chi1/chi2 features. Clamp to the minimum.
+    n_feats = min(ref_ang.shape[1], gen_ang.shape[1])
+    labels  = labels[:n_feats]
+
     for i, feat in enumerate(labels):
         ref_p = np.histogram(ref_ang[:, i], range=(-np.pi, np.pi), bins=100)[0]
         gen_p = np.histogram(gen_ang[:, i], range=(-np.pi, np.pi), bins=100)[0]
@@ -315,6 +320,9 @@ def run_analysis_deeptime(ref_dir: str, gen_dir: str, protein: str,
     # --- TICA JSD (cos/sin features, deeptime TICA) ---
     ref_cs, _ = _compute_torsions(ref_pdb, ref_xtc, cossin=True)
     gen_cs, _ = _compute_torsions(gen_pdb, gen_xtc, cossin=True)
+    # Align feature count (same root cause as raw-angle clamp above)
+    n_cs = min(ref_cs.shape[1], gen_cs.shape[1])
+    ref_cs, gen_cs = ref_cs[:, :n_cs], gen_cs[:, :n_cs]
 
     lag = min(1000, ref_cs.shape[0] // 3)
     tica = TICA(lagtime=lag, dim=2).fit_fetch(ref_cs)
