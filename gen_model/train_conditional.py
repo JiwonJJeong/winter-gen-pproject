@@ -139,7 +139,8 @@ def main():
         accelerator='auto', devices='auto',
         callbacks=[checkpoint_cb],
         precision='16-mixed' if torch.cuda.is_available() else 32,
-        log_every_n_steps=10,
+        log_every_n_steps=500,
+        enable_progress_bar=False,
         gradient_clip_val=args.grad_clip,
         accumulate_grad_batches=args.accumulate_grad,
     )
