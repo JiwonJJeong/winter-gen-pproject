@@ -128,9 +128,10 @@ python gen_model/inference_unconditional.py \
     --protein_name 4o66_C --num_samples 100
 
 # Conditional: 250-frame trajectory (ATLAS protocol)
+# Default: --n_steps 150. Initial run used --n_steps 200.
 python gen_model/inference_conditional.py \
     --checkpoint checkpoints/conditional/4o66_C/last.ckpt \
-    --data_dir data --protein 4o66_C --total_frames 250
+    --data_dir data --protein 4o66_C --total_frames 250 --n_steps 200
 ```
 
 ### Evaluation
