@@ -505,7 +505,7 @@ def _integrated_relaxation_times(decorr_dict: dict, dt_ns: float) -> dict:
 
 
 def plot_summary(pkl_path: str, out_dir: str, protein: str, mode: str,
-                 dt_ns: float = 0.1):
+                 ref_dt_ns: float = 0.01, gen_dt_ns: float = 0.1):
     """Generate and save evaluation plots from the results pickle.
 
     Produces three figures saved as PNGs in out_dir:
@@ -694,8 +694,8 @@ def plot_summary(pkl_path: str, out_dir: str, protein: str, mode: str,
     # Figure 3: Torsional relaxation timescale scatter (log-log)         #
     # Mirrors STAR-MD paper Fig. F: τ_MD (x) vs τ_gen (y) per torsion   #
     # ------------------------------------------------------------------ #
-    tau_md  = _integrated_relaxation_times(md_dec,  dt_ns)
-    tau_gen = _integrated_relaxation_times(our_dec, dt_ns)
+    tau_md  = _integrated_relaxation_times(md_dec,  ref_dt_ns)
+    tau_gen = _integrated_relaxation_times(our_dec, gen_dt_ns)
 
     common = sorted(set(tau_md) & set(tau_gen))
     if common:
@@ -770,8 +770,10 @@ def main():
     parser.add_argument('--out_dir',    type=str, default='outputs/eval')
     parser.add_argument('--coord_scale', type=float, default=0.1,
                         help='Scale used during training (default 0.1); must match inference')
-    parser.add_argument('--dt_ns',      type=float, default=0.1,
-                        help='Physical time between frames in ns (default 0.1)')
+    parser.add_argument('--ref_dt_ns',  type=float, default=0.01,
+                        help='ns per frame in reference ATLAS data (default 0.01 = 10 ps)')
+    parser.add_argument('--gen_dt_ns',  type=float, default=0.1,
+                        help='ns per frame in generated trajectory (default 0.1 = delta_t)')
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -858,7 +860,7 @@ def main():
 
     if not args.no_plot:
         plot_summary(pkl_path, gen_traj_dir, args.protein, args.mode,
-                     dt_ns=args.dt_ns)
+                     ref_dt_ns=args.ref_dt_ns, gen_dt_ns=args.gen_dt_ns)
 
 
 if __name__ == '__main__':
