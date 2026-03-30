@@ -285,6 +285,10 @@ def main():
     parser.add_argument('--lora_r',        type=int,   default=0)
     parser.add_argument('--lora_alpha',    type=float, default=0.0)
     parser.add_argument('--st_num_heads',  type=int,   default=8)
+    parser.add_argument('--num_blocks',    type=int,   default=8,
+                        help='Number of IPA blocks (must match checkpoint)')
+    parser.add_argument('--spatial_sigma', type=float, default=0.0,
+                        help='Spatial Gaussian bias in ST attention (must match training)')
     parser.add_argument('--device',        type=str,
                         default='cuda' if torch.cuda.is_available() else 'cpu')
     args = parser.parse_args()
@@ -298,6 +302,8 @@ def main():
         st_num_heads=args.st_num_heads,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
+        num_blocks=args.num_blocks,
+        spatial_sigma=args.spatial_sigma,
     )
     diffuser      = SE3Diffuser(se3_conf)
     score_network = StarScoreNetwork(model_conf, diffuser)
