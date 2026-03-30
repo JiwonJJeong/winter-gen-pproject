@@ -53,6 +53,9 @@ class EMA:
     @torch.no_grad()
     def update(self, model: torch.nn.Module):
         for k, v in model.state_dict().items():
+            # Shadow is initialised on CPU; migrate lazily to the model's device.
+            # .to() is a no-op when already on the correct device.
+            self.shadow[k] = self.shadow[k].to(v.device)
             self.shadow[k].mul_(self.decay).add_(v, alpha=1.0 - self.decay)
 
     def apply(self, model: torch.nn.Module):
