@@ -321,7 +321,7 @@ def main():
     parser.add_argument('--checkpoint',    type=str, required=True)
     parser.add_argument('--data_dir',      type=str, default='data')
     parser.add_argument('--atlas_csv',     type=str, default='gen_model/splits/atlas.csv')
-    parser.add_argument('--train_split',   type=str, default='gen_model/splits/frame_splits.csv')
+    parser.add_argument('--train_split',   type=str, default='gen_model/splits/atlas.csv')
     parser.add_argument('--suffix',        type=str, default='_latent')
     parser.add_argument('--protein',       type=str, default=None,
                         help='Protein name to seed from (uses first val frame)')

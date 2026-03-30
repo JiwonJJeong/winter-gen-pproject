@@ -239,7 +239,7 @@ def main():
                         help='Training mode: unconditional or conditional')
     parser.add_argument('--data_dir',         type=str,   default='data')
     parser.add_argument('--atlas_csv',        type=str,   default='gen_model/splits/atlas.csv')
-    parser.add_argument('--train_split',      type=str,   default='gen_model/splits/frame_splits.csv')
+    parser.add_argument('--train_split',      type=str,   default='gen_model/splits/atlas.csv')
     parser.add_argument('--suffix',           type=str,   default='_latent')
     parser.add_argument('--batch_size',       type=int,   default=8)
     parser.add_argument('--n_trials',         type=int,   default=20,
