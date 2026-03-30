@@ -359,10 +359,14 @@ def main():
     score_network = StarScoreNetwork(model_conf, diffuser)
     apply_lora(score_network, model_conf.lora)
 
-    # Load checkpoint — strip Lightning 'model.' prefix
+    # Load checkpoint — strip Lightning 'model.' prefix and drop stale
+    # non-persistent buffers (e.g. rope.inv_freq from old checkpoints).
     ckpt  = torch.load(args.checkpoint, map_location='cpu')
     state = ckpt.get('state_dict', ckpt)
     state = {k[len('model.'):]: v for k, v in state.items() if k.startswith('model.')}
+    # Remove inv_freq entries: they are now non-persistent and recomputed
+    # from head_dim at __init__ time, so stale sizes cause no harm.
+    state = {k: v for k, v in state.items() if not k.endswith('.rope.inv_freq')}
     score_network.load_state_dict(state, strict=False)
     score_network.eval().to(device)
 

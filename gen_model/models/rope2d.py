@@ -33,7 +33,10 @@ class RoPE2D(nn.Module):
 
         # inv_freq[d] = base^{-2d / half},  shape [quarter]
         inv_freq = 1.0 / (base ** (torch.arange(0, quarter).float() * 2.0 / half))
-        self.register_buffer("inv_freq", inv_freq)
+        # persistent=False: inv_freq is fully determined by head_dim/base —
+        # never saved in or loaded from checkpoints, so head count mismatches
+        # between checkpoint and current model can never cause size errors.
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.head_dim = head_dim
 
     # ------------------------------------------------------------------
