@@ -15,8 +15,8 @@ Usage:
 import torch
 import os
 import argparse
-import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint
+import pytorch_lightning as L
+from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 
 from gen_model.train_base import default_se3_conf, default_model_conf, default_data_args

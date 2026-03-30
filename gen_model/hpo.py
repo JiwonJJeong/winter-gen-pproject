@@ -142,8 +142,8 @@ def make_objective(args):
     """Return an Optuna objective function closed over parsed CLI args."""
 
     def objective(trial: optuna.Trial) -> float:
-        import lightning as L
-        from lightning.pytorch.callbacks import ModelCheckpoint
+        import pytorch_lightning as L
+        from pytorch_lightning.callbacks import ModelCheckpoint
         from optuna.integration.pytorch_lightning import PyTorchLightningPruningCallback
         from gen_model.train_base import default_model_conf, default_data_args
         from gen_model.diffusion.se3_diffuser import SE3Diffuser
