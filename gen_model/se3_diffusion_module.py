@@ -369,11 +369,12 @@ class SE3Diffusion(L.LightningModule):
     # ------------------------------------------------------------------
 
     def _log_losses(self, split: str, loss, rot, trans, psi, bs: int):
-        on_step = (split == 'train')
-        self.log(f'{split}_loss',       loss,  on_step=on_step, on_epoch=True, prog_bar=True, batch_size=bs)
-        self.log(f'{split}_rot_loss',   rot,   on_step=False,   on_epoch=True,                batch_size=bs)
-        self.log(f'{split}_trans_loss', trans, on_step=False,   on_epoch=True,                batch_size=bs)
-        self.log(f'{split}_psi_loss',   psi,   on_step=False,   on_epoch=True,                batch_size=bs)
+        on_step  = (split == 'train')
+        on_epoch = (split != 'train')   # epoch agg meaningless for virtual-epoch step-based training
+        self.log(f'{split}_loss',       loss,  on_step=on_step, on_epoch=on_epoch, prog_bar=True, batch_size=bs)
+        self.log(f'{split}_rot_loss',   rot,   on_step=on_step, on_epoch=on_epoch,               batch_size=bs)
+        self.log(f'{split}_trans_loss', trans, on_step=on_step, on_epoch=on_epoch,               batch_size=bs)
+        self.log(f'{split}_psi_loss',   psi,   on_step=on_step, on_epoch=on_epoch,               batch_size=bs)
 
     def training_step(self, batch, batch_idx):
         loss, rot, trans, psi = self.forward(batch)
