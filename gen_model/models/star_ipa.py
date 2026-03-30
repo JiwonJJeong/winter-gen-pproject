@@ -125,6 +125,10 @@ class StarIpaScore(IpaScore):
         curr_rigids = Rigid.from_tensor_7(torch.clone(init_frames))
         init_rigids = Rigid.from_tensor_7(init_frames)
 
+        # Scale translations for IPA (upstream uses coordinate_scaling=0.1 so
+        # Cα–Cα distances ~0.38 in IPA space rather than ~3.8 Å unscaled).
+        curr_rigids = self.scale_rigids(curr_rigids)
+
         # Sequence transformer Gaussian bias (only when STAR-MD is disabled).
         _seq_tfmr_mask = None
         if not self._star_enabled:
@@ -165,8 +169,10 @@ class StarIpaScore(IpaScore):
                 st_mask = unflat(node_mask)        # [B, L, N]
                 nef     = unflat(node_embed)       # [B, L, N, c_s]
 
-                # CA positions for spatial Gaussian bias (if spatial_sigma > 0)
-                ca_pos = unflat(curr_rigids.get_trans())  # [B, L, N, 3]
+                # CA positions for spatial Gaussian bias (if spatial_sigma > 0).
+                # curr_rigids is in scaled units inside the trunk; unscale here
+                # so ca_pos is in Angstroms, consistent with spatial_sigma config.
+                ca_pos = unflat(self.unscale_rigids(curr_rigids).get_trans())  # [B, L, N, 3]
 
                 cache_b = kv_caches[b] if kv_caches is not None else None
                 delta, new_kv_b = self.trunk[f'st_attn_{b}'](
@@ -197,6 +203,10 @@ class StarIpaScore(IpaScore):
                 edge_embed *= edge_mask[..., None]
 
         # ── Score computation ─────────────────────────────────────────────
+        # Unscale back to Angstroms before computing scores; calc_trans_score
+        # will re-scale internally (scale=True default) to match ground truth.
+        curr_rigids = self.unscale_rigids(curr_rigids)
+
         rot_score = self.diffuser.calc_rot_score(
             init_rigids.get_rots(), curr_rigids.get_rots(), t_flat)
         rot_score = rot_score * node_mask[..., None]
