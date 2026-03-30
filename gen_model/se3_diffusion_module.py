@@ -285,7 +285,11 @@ class SE3Diffusion(L.LightningModule):
             rot_t_mask = rot_t_mask[:, None, None].expand_as(rot_mse)
         else:
             rot_t_mask = rot_t_mask[:, None].expand_as(rot_mse)
-        rot_loss = (rot_mse * mask_exp * rot_t_mask).sum() / (n_visible + 1e-8)
+        # Normalise by the tokens that actually contribute (t < threshold),
+        # not all visible tokens — otherwise rot_loss is underweighted whenever
+        # some batch items have t >= rot_t_threshold (their contribution is 0).
+        n_rot = (mask_exp * rot_t_mask).sum() + 1e-8
+        rot_loss = (rot_mse * mask_exp * rot_t_mask).sum() / n_rot
 
         trans_loss = (trans_mse * mask_exp).sum() / n_visible
 
@@ -315,8 +319,12 @@ class SE3Diffusion(L.LightningModule):
             # Distance matrix loss (pairwise CA-CA)
             pred_ca = pred_bb[:, :, 1, :]  # [B, N, 3] — CA is index 1 in atom37
             gt_ca   = gt_bb[:, :, 1, :]
-            pred_dist = torch.cdist(pred_ca, pred_ca)  # [B, N, N]
-            gt_dist   = torch.cdist(gt_ca, gt_ca)
+            # Squared distances directly (avoids sqrt gradient NaN at zero).
+            def _sq_dist(x):
+                d = x.unsqueeze(2) - x.unsqueeze(1)   # [B, N, N, 3]
+                return d.pow(2).sum(-1)                # [B, N, N]
+            pred_dist = _sq_dist(pred_ca)
+            gt_dist   = _sq_dist(gt_ca)
             dist_mask = mask[:, :, None] * mask[:, None, :]  # [B, N, N]
             dist_mse  = ((pred_dist - gt_dist) ** 2 * dist_mask).sum() / (dist_mask.sum() + 1e-8)
             dist_mse  = dist_mse * aux_t_mask.mean()
@@ -382,8 +390,9 @@ class SE3Diffusion(L.LightningModule):
         self.step_counter += 1
         return loss
 
-    def on_before_optimizer_step(self, optimizer):
-        """Update EMA after each gradient step (MDGen pattern)."""
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        """Update EMA after the optimizer step (must use on_train_batch_end,
+        not on_before_optimizer_step, so shadow weights see w_{t+1} not w_t)."""
         if self.ema is not None:
             self.ema.update(self.model)
 
