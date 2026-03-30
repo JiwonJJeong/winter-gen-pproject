@@ -61,6 +61,8 @@ def main():
     parser.add_argument('--spatial_sigma',       type=float, default=0.0,
                         help='Spatial Gaussian sigma for ST attention (Angstroms). '
                              '0 = global. SinFusion-inspired local receptive field.')
+    parser.add_argument('--num_blocks',          type=int,   default=8,
+                        help='Number of IPA blocks (paper: 8; Colab: 4 for speed)')
     # MDGen-inspired options
     parser.add_argument('--grad_clip',           type=float, default=1.0,
                         help='Gradient clipping value (MDGen default: 1.0)')
@@ -93,6 +95,7 @@ def main():
         star_enabled=args.star_enabled,
         st_num_heads=args.st_num_heads,
         spatial_sigma=args.spatial_sigma,
+        num_blocks=args.num_blocks,
     )
     data_args  = default_data_args(args)
     diffuser   = SE3Diffuser(se3_conf)

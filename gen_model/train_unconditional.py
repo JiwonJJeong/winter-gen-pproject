@@ -41,6 +41,8 @@ def main():
     parser.add_argument('--save_dir',    type=str,   default='checkpoints/unconditional')
     parser.add_argument('--lora_r',      type=int,   default=0)
     parser.add_argument('--lora_alpha',  type=float, default=0.0)
+    parser.add_argument('--num_blocks',  type=int,   default=8,
+                        help='Number of IPA blocks (paper: 8; Colab: 4 for speed)')
     # MDGen-inspired options
     parser.add_argument('--grad_clip',   type=float, default=1.0,
                         help='Gradient clipping value (MDGen default: 1.0)')
@@ -66,6 +68,7 @@ def main():
     model_conf = default_model_conf(
         star_enabled=False,
         lora_r=args.lora_r, lora_alpha=args.lora_alpha,
+        num_blocks=args.num_blocks,
     )
     data_args  = default_data_args(args)
     diffuser   = SE3Diffuser(se3_conf)
