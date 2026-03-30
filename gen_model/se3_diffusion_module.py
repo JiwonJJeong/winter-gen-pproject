@@ -114,6 +114,7 @@ class SE3Diffusion(L.LightningModule):
         aux_t_threshold: float = 0.25,
         cosine_T_max: int = 100_000,
         ema_decay: float = 0.999,
+        warmup_steps: int = 0,
     ):
         super().__init__()
         self.model = model
@@ -130,6 +131,7 @@ class SE3Diffusion(L.LightningModule):
         self.rot_t_threshold = rot_t_threshold
         self.aux_t_threshold = aux_t_threshold
         self.cosine_T_max = cosine_T_max
+        self.warmup_steps = warmup_steps
         self.step_counter = 0  # mirrors SinFusion's step_counter
         self.ema = EMA(model, decay=ema_decay) if ema_decay > 0 else None
         self._ema_backup = None
@@ -401,9 +403,16 @@ class SE3Diffusion(L.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optim = torch.optim.Adam(self.parameters(), lr=self.lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optim = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-4)
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
             optim, T_max=self.cosine_T_max, eta_min=self.lr * 0.01)
+        if self.warmup_steps > 0:
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                optim, start_factor=0.1, end_factor=1.0, total_iters=self.warmup_steps)
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optim, schedulers=[warmup, cosine], milestones=[self.warmup_steps])
+        else:
+            scheduler = cosine
         return {
             'optimizer': optim,
             'lr_scheduler': {'scheduler': scheduler, 'interval': 'step'},

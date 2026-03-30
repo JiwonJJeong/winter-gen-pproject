@@ -83,6 +83,8 @@ def main():
     parser.add_argument('--early_stop_patience', type=int, default=0,
                         help='Stop if train_loss does not improve for this many epochs. '
                              '0 = disabled (default).')
+    parser.add_argument('--warmup_steps', type=int, default=0,
+                        help='Linear LR warmup steps before cosine decay (0 = disabled)')
     parser.add_argument('--aux_t_threshold', type=float, default=0.25,
                         help='Only apply backbone atom + distance matrix aux losses when t < this '
                              '(paper: 0.25; raise to 0.5 for faster convergence)')
@@ -150,6 +152,7 @@ def main():
         cosine_T_max=args.max_steps,
         ema_decay=args.ema_decay,
         aux_t_threshold=args.aux_t_threshold,
+        warmup_steps=args.warmup_steps,
     )
 
     checkpoint_cb = ModelCheckpoint(
