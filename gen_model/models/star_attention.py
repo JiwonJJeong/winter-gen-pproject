@@ -227,18 +227,20 @@ class SpatioTemporalAttention(nn.Module):
         if self.spatial_sigma > 0 and ca_pos is not None:
             # ca_pos: [B, L, N, 3] → flatten to [B, T_new, 3]
             ca_flat = ca_pos.reshape(B, T_new, 3)
+            # Compute squared distances directly (avoids sqrt whose gradient is
+            # undefined at zero, which NaN-poisons the diagonal of cdist output).
+            diff = ca_flat.unsqueeze(2) - ca_flat.unsqueeze(1)   # [B, T_new, T_new, 3]
+            dist_sq = diff.pow(2).sum(-1)                         # [B, T_new, T_new]
+            new_bias = -(dist_sq / self.spatial_sigma ** 2).unsqueeze(1)  # [B, 1, T_new, T_new]
             if L_cached > 0 and kv_cache is not None:
-                # For cached context, we don't have CA positions — assume
-                # same-residue tokens across frames have zero spatial penalty.
-                # Build a dummy spatial bias of zeros for cached tokens.
-                spatial_bias = torch.zeros(B, 1, T_new, L_total * N,
+                # For cached context we have no CA positions — zero spatial penalty
+                # for cached tokens.  Use torch.cat (not in-place assignment) so the
+                # autograd graph is preserved through new_bias.
+                zeros_cached = torch.zeros(B, 1, T_new, L_cached * N,
                                            device=s_frames.device, dtype=q.dtype)
-                # Only compute for the new×new block
-                new_dist = torch.cdist(ca_flat, ca_flat)  # [B, T_new, T_new]
-                spatial_bias[:, :, :, L_cached * N:] = -(new_dist / self.spatial_sigma).pow(2).unsqueeze(1)
+                spatial_bias = torch.cat([zeros_cached, new_bias], dim=-1)  # [B, 1, T_new, T_total]
             else:
-                dist = torch.cdist(ca_flat, ca_flat)  # [B, T, T]
-                spatial_bias = -(dist / self.spatial_sigma).pow(2).unsqueeze(1)  # [B, 1, T, T]
+                spatial_bias = new_bias  # [B, 1, T, T]
             attn_bias = attn_bias + spatial_bias
 
         # 7. Scaled dot-product attention
