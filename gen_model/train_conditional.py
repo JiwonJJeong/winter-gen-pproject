@@ -20,6 +20,8 @@ import os
 import argparse
 import pytorch_lightning as L
 from pytorch_lightning.callbacks import ModelCheckpoint
+
+torch.set_float32_matmul_precision('high')
 from torch.utils.data import DataLoader
 
 from gen_model.train_base import default_se3_conf, default_model_conf, default_data_args
