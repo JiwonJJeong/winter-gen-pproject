@@ -427,43 +427,46 @@ def main():
     score_network.eval().to(device)
 
     # Seed frame from first val sample
-    from gen_model.data.dataset import ConditionalMDGenDataset
-    from omegaconf import OmegaConf
     import glob as _glob
+    import pandas as pd
+    from gen_model.data.geometry import atom14_to_frames, atom14_to_atom37
+    from gen_model.utils.rigid_utils import Rigid, Rotation
 
-    # Auto-detect suffix: find any _R1*.npy for the protein and infer the suffix
-    suffix = args.suffix
-    if suffix is None and args.protein:
-        prot_dir = os.path.join(args.data_dir, args.protein)
-        candidates = _glob.glob(os.path.join(prot_dir, f'{args.protein}_R1*.npy'))
-        if candidates:
-            stem = os.path.splitext(os.path.basename(candidates[0]))[0]  # e.g. 4o66_C_R1_latent
-            suffix = stem[len(f'{args.protein}_R1'):]  # e.g. _latent
-            print(f'Auto-detected suffix: "{suffix}"')
-        else:
-            suffix = ''
+    # --- Find trajectory file directly (no split CSV needed) ---
+    prot_dir   = os.path.join(args.data_dir, args.protein)
+    candidates = sorted(_glob.glob(os.path.join(prot_dir, f'{args.protein}_R1*.npy')))
+    if not candidates:
+        raise FileNotFoundError(f'No trajectory found for {args.protein} in {prot_dir}')
+    npy_path = candidates[0]
+    print(f'Seed trajectory: {npy_path}')
 
-    data_args = OmegaConf.create({
-        'data_dir': args.data_dir, 'atlas_csv': args.atlas_csv,
-        'train_split': args.train_split, 'suffix': suffix,
-        'frame_interval': None, 'crop_ratio': 1.0, 'min_t': 0.01,
-        'ns_per_stored_frame': args.delta_t,
-    })
-    if args.protein:
-        data_args.pep_name = args.protein
+    # --- Load sequence from atlas.csv ---
+    atlas_df = pd.read_csv(args.atlas_csv, index_col='name')
+    seqres   = atlas_df.loc[args.protein, 'seqres']
+    from gen_model.data.residue_constants import restype_order
+    aatype_np = np.array([restype_order[c] for c in seqres])
+    N_res     = len(aatype_np)
 
-    # Pass split explicitly to atlas.csv so MDGenDataset never falls back to
-    # frame_splits.csv (whose name stems include the suffix, causing double-append).
-    # mode='all' with atlas.csv (no split columns) uses every available frame.
-    ds = ConditionalMDGenDataset(
-        args=data_args, split=args.atlas_csv, mode='all',
-        num_frames=args.num_frames,
-        ns_per_stored_frame=args.delta_t,
+    # --- Load first frame and compute rigid ---
+    arr        = np.load(npy_path)          # [T, N, 14, 3]
+    frame0     = arr[0:1].astype(np.float32)  # [1, N, 14, 3]
+    aatype_t   = torch.from_numpy(aatype_np)[None]          # [1, N]
+    frames_out = atom14_to_frames(torch.from_numpy(frame0))
+    rigid0     = Rigid(
+        rots=Rotation(rot_mats=frames_out._rots._rot_mats[0]),
+        trans=frames_out._trans[0],
     )
-    seed_sample = ds[0]
-    seed_rigids = seed_sample['rigids_0'][0].to(device)   # first frame of window [N,7]
-    seq_idx     = seed_sample['seq_idx'].to(device)
-    res_mask    = seed_sample['res_mask'].to(device)
+    r7 = rigid0.to_tensor_7()
+    # Centre and scale (match training: coord_scale = 1/std of CA coords)
+    ca0      = torch.from_numpy(frame0[0, :, 1, :])         # [N, 3]
+    centroid = ca0.mean(dim=0, keepdim=True)
+    ca_std   = ca0.std().item()
+    coord_scale = 1.0 / (ca_std + 1e-8)
+    r7[..., 4:] = (r7[..., 4:] - centroid) * coord_scale
+
+    seed_rigids = r7.to(device)                              # [N, 7]
+    seq_idx     = torch.arange(1, N_res + 1, device=device) # [N]
+    res_mask    = torch.ones(N_res, device=device)           # [N]
 
     print(f'Generating {args.total_frames} frames '
           f'(N={seq_idx.shape[0]} residues, delta_t={args.delta_t} ns) ...')
