@@ -30,7 +30,6 @@ def main():
     parser = argparse.ArgumentParser(description='STAR-MD Conditional SE(3) Diffusion Training')
     parser.add_argument('--data_dir',            type=str,   default='data')
     parser.add_argument('--atlas_csv',           type=str,   default='gen_model/splits/atlas.csv')
-    parser.add_argument('--train_split',         type=str,   default='gen_model/splits/atlas.csv')
     parser.add_argument('--suffix',              type=str,   default='_latent')
     parser.add_argument('--protein',              type=str,   required=True,
                         help='Protein name to train on (single trajectory, SinFusion-style)')

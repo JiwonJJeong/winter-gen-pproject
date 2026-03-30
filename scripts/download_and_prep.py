@@ -7,7 +7,6 @@ import sys
 # Add project root to path to import scripts
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from scripts.prep_sims import traj_to_atom14
-from gen_model.data.split import create_split
 import mdtraj
 import numpy as np
 import tqdm
@@ -113,9 +112,6 @@ if __name__ == "__main__":
     parser.add_argument("--out_dir", type=str, default="./data", help="Directory to save preprocessed .npy files")
     parser.add_argument("--suffix", type=str, default="", help="Suffix for preprocessed .npy files")
     parser.add_argument("--stride", type=int, default=1, help="Stride for preprocessing")
-    parser.add_argument("--train_early_ns", type=float, default=5.0, help="Duration of the early training split in nanoseconds")
-    parser.add_argument("--ratios", type=float, nargs=3, default=[0.6, 0.2, 0.2], help="Ratios for train, val, test splits after early part")
-    parser.add_argument("--split_output", type=str, default="gen_model/splits/frame_splits.csv", help="Output CSV file for splits")
     parser.add_argument("--redownload", action='store_true', help="Redownload the protein data even if it exists")
     parser.add_argument("--force_prep", action='store_true', help="Force preprocessing even if .npy files exist")
     args = parser.parse_args()
@@ -136,34 +132,4 @@ if __name__ == "__main__":
     # The shell script was: `mkdir ${name}; unzip ... -d ${name}`. 
     # So raw path will be data_dir/${name}/...
     
-    # We need to know the timestep for splitting
-    # ATLAS data usually has 10ps per frame. Let's try to detect it.
-    ps_per_frame = 10.0 # Default fallback
-    try:
-        # Load the first two frames of one replicate to get timestep
-        folder_name = args.name
-        replicate_idx = 1
-        traj_path = os.path.join(args.data_dir, folder_name, f"{folder_name}_prod_R{replicate_idx}_fit.xtc")
-        pdb_path = os.path.join(args.data_dir, folder_name, f"{folder_name}.pdb")
-        if os.path.exists(traj_path) and os.path.exists(pdb_path):
-            # Using iterload with chunk=2 to safely get timestep from two frames
-            for t in mdtraj.iterload(traj_path, chunk=2, top=pdb_path):
-                if t.timestep > 0:
-                    ps_per_frame = t.timestep
-                    print(f"Detected timestep: {ps_per_frame} ps")
-                break
-    except Exception as e:
-        print(f"Warning: Could not detect timestep, using default {ps_per_frame} ps. Error: {e}")
-
-    # The actual ps_per_frame in the saved .npy depends on stride
-    npy_ps_per_frame = ps_per_frame * args.stride
-
     preprocess_protein(args.name, args.data_dir, args.out_dir, suffix=args.suffix, stride=args.stride, atlas=True, force=args.force_prep)
-
-    # 3. Create Split
-    print(f"Creating 4-way split (Early: {args.train_early_ns}ns, Ratios: {args.ratios})...")
-    create_split(args.name, args.out_dir, args.split_output, 
-                 suffix=args.suffix,
-                 ps_per_frame=npy_ps_per_frame, 
-                 train_early_ns=args.train_early_ns, 
-                 ratios=tuple(args.ratios))

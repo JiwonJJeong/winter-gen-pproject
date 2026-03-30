@@ -1,3 +1,5 @@
+import glob as _glob
+import os
 import torch
 import numpy as np
 import pandas as pd
@@ -31,13 +33,13 @@ except ImportError:
     data_transforms = None
 
 class MDGenDataset(torch.utils.data.Dataset):
-    def __init__(self, args, split=None, mode='train', repeat=1, num_consecutive=1, stride=1,
+    def __init__(self, args, mode='train', repeat=1, num_consecutive=1, stride=1,
                  virtual_epoch_size: int = 0):
         """
         Args:
             args: Global config object.
-            split: Path to the split CSV (optional).
             mode: Dataset mode ('train', 'val', 'test', 'train_early', or 'all').
+                  Without a split CSV all modes fall back to using all frames.
             repeat: Oversampling factor.
             num_consecutive: Number of frames to return (1, 2, 3, etc.).
             stride: Gap between the consecutive frames (e.g., stride 2 picks frame 0, 2, 4).
@@ -48,18 +50,24 @@ class MDGenDataset(torch.utils.data.Dataset):
         self.args = _plain_args(args)
         self.mode = mode
         self._is_training = mode in ['train', 'train_early']
-        
-        # Determine split file if not provided
-        if split is None:
-            # Check for overrides in args, otherwise use the master split file
-            if mode in ['train', 'train_early']:
-                split = getattr(args, 'train_split', None)
-            elif mode == 'val':
-                split = getattr(args, 'val_split', None)
-            
-            split = split or 'gen_model/splits/frame_splits.csv'
-        
-        self.df = pd.read_csv(split, index_col='name')
+
+        # Discover available .npy files directly from the filesystem.
+        # No split CSV needed: protein/replica filtering is handled by
+        # pep_name and replica fields in args (set via --protein / --replica).
+        prot = getattr(self.args, 'pep_name', None)
+        suf  = self.args.suffix
+        subdir = prot if prot else '*'
+        pattern = os.path.join(self.args.data_dir, subdir, f'*{suf}.npy')
+        npy_files = sorted(_glob.glob(pattern))
+        names = []
+        for p in npy_files:
+            stem = os.path.basename(p)
+            if suf and stem.endswith(f'{suf}.npy'):
+                stem = stem[: -len(f'{suf}.npy')]
+            elif stem.endswith('.npy'):
+                stem = stem[:-4]
+            names.append(stem)
+        self.df = pd.DataFrame(index=pd.Index(names, name='name'))
         
         # Load the sequence mapping from atlas.csv
         # This maps '4o66_C' -> 'SEQUENCE...'

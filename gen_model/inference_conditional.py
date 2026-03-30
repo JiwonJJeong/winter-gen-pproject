@@ -376,7 +376,6 @@ def main():
     parser.add_argument('--checkpoint',    type=str, required=True)
     parser.add_argument('--data_dir',      type=str, default='data')
     parser.add_argument('--atlas_csv',     type=str, default='gen_model/splits/atlas.csv')
-    parser.add_argument('--train_split',   type=str, default='gen_model/splits/atlas.csv')
     parser.add_argument('--suffix',        type=str, default=None,
                         help='File suffix for trajectory .npy files (e.g. "_latent"). '
                              'Auto-detected from data_dir if not specified.')

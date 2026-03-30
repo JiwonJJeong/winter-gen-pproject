@@ -86,7 +86,7 @@ def default_data_args(args):
     from omegaconf import OmegaConf
     return OmegaConf.create({
         'data_dir': args.data_dir, 'atlas_csv': args.atlas_csv,
-        'train_split': args.train_split, 'suffix': args.suffix,
+        'suffix': args.suffix,
         'frame_interval': None, 'crop_ratio': 0.95, 'min_t': 0.01,
         'coord_scale': 0.1,  # Paper appendix: fixed coordinate_scaling = 0.1
         # Physical time between consecutive stored frames (ns).
