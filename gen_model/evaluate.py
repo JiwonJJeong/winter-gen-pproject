@@ -213,63 +213,193 @@ def compute_validity(atom14: np.ndarray, aatype: np.ndarray) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Run MDGen analysis
+# Run MDGen analysis (pyemma) or fallback (deeptime + mdtraj)
 # ---------------------------------------------------------------------------
+
+def _has_pyemma() -> bool:
+    try:
+        import pyemma  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _compute_torsions(pdb_path: str, xtc_path: str, cossin: bool = False):
+    """Extract backbone + sidechain torsion angles via mdtraj."""
+    import mdtraj
+    traj = mdtraj.load(xtc_path, top=pdb_path)
+    _, phi = mdtraj.compute_phi(traj)
+    _, psi = mdtraj.compute_psi(traj)
+    _, omega = mdtraj.compute_omega(traj)
+    _, chi1 = mdtraj.compute_chi1(traj)
+    _, chi2 = mdtraj.compute_chi2(traj)
+
+    labels = ([f'PHI_{i}' for i in range(phi.shape[1])]
+              + [f'PSI_{i}' for i in range(psi.shape[1])]
+              + [f'OMEGA_{i}' for i in range(omega.shape[1])]
+              + [f'CHI1_{i}' for i in range(chi1.shape[1])]
+              + [f'CHI2_{i}' for i in range(chi2.shape[1])])
+    angles = np.concatenate([phi, psi, omega, chi1, chi2], axis=1)
+
+    if cossin:
+        cos_sin = np.concatenate([np.cos(angles), np.sin(angles)], axis=1)
+        cs_labels = [f'COS({l})' for l in labels] + [f'SIN({l})' for l in labels]
+        return cos_sin, cs_labels
+
+    return angles, labels
+
+
+def run_analysis_deeptime(ref_dir: str, gen_dir: str, protein: str,
+                          mode: str = 'conditional',
+                          compute_decorr: bool = True) -> dict:
+    """Compute torsion JSD, TICA JSD, and decorrelation using deeptime + mdtraj.
+
+    Fallback for when pyemma is not installed. Produces the same result
+    structure as MDGen's analyze_peptide_sim.py.
+    """
+    from scipy.spatial.distance import jensenshannon
+    from deeptime.decomposition import TICA
+
+    ref_pdb = os.path.join(ref_dir, protein, f'{protein}.pdb')
+    ref_xtc = os.path.join(ref_dir, protein, f'{protein}.xtc')
+    gen_pdb = os.path.join(gen_dir, f'{protein}.pdb')
+    gen_xtc = os.path.join(gen_dir, f'{protein}.xtc')
+
+    results = {'JSD': {}}
+
+    # --- Torsion JSD (raw angles) ---
+    ref_ang, labels = _compute_torsions(ref_pdb, ref_xtc, cossin=False)
+    gen_ang, _      = _compute_torsions(gen_pdb, gen_xtc, cossin=False)
+
+    for i, feat in enumerate(labels):
+        ref_p = np.histogram(ref_ang[:, i], range=(-np.pi, np.pi), bins=100)[0]
+        gen_p = np.histogram(gen_ang[:, i], range=(-np.pi, np.pi), bins=100)[0]
+        results['JSD'][feat] = float(jensenshannon(ref_p, gen_p))
+
+    # 2D phi-psi JSD
+    phi_count = sum(1 for l in labels if l.startswith('PHI_'))
+    psi_count = sum(1 for l in labels if l.startswith('PSI_'))
+    n_pairs = min(phi_count, psi_count)
+    for i in range(n_pairs):
+        phi_idx = i               # PHI_i
+        psi_idx = phi_count + i   # PSI_i
+        r = ((-np.pi, np.pi), (-np.pi, np.pi))
+        ref_p = np.histogram2d(ref_ang[:, phi_idx], ref_ang[:, psi_idx],
+                               range=r, bins=50)[0]
+        gen_p = np.histogram2d(gen_ang[:, phi_idx], gen_ang[:, psi_idx],
+                               range=r, bins=50)[0]
+        pair_label = f'{labels[phi_idx]}|{labels[psi_idx]}'
+        results['JSD'][pair_label] = float(jensenshannon(ref_p.flatten(),
+                                                          gen_p.flatten()))
+
+    # --- TICA JSD (cos/sin features, deeptime TICA) ---
+    ref_cs, _ = _compute_torsions(ref_pdb, ref_xtc, cossin=True)
+    gen_cs, _ = _compute_torsions(gen_pdb, gen_xtc, cossin=True)
+
+    lag = min(1000, ref_cs.shape[0] // 3)
+    tica = TICA(lagtime=lag, dim=2).fit_fetch(ref_cs)
+    ref_tica = tica.transform(ref_cs)
+    gen_tica = tica.transform(gen_cs)
+
+    t0_min = min(ref_tica[:, 0].min(), gen_tica[:, 0].min())
+    t0_max = max(ref_tica[:, 0].max(), gen_tica[:, 0].max())
+    t1_min = min(ref_tica[:, 1].min(), gen_tica[:, 1].min())
+    t1_max = max(ref_tica[:, 1].max(), gen_tica[:, 1].max())
+
+    ref_p = np.histogram(ref_tica[:, 0], range=(t0_min, t0_max), bins=100)[0]
+    gen_p = np.histogram(gen_tica[:, 0], range=(t0_min, t0_max), bins=100)[0]
+    results['JSD']['TICA-0'] = float(jensenshannon(ref_p, gen_p))
+
+    ref_p = np.histogram2d(*ref_tica[:, :2].T,
+                           range=((t0_min, t0_max), (t1_min, t1_max)),
+                           bins=50)[0]
+    gen_p = np.histogram2d(*gen_tica[:, :2].T,
+                           range=((t0_min, t0_max), (t1_min, t1_max)),
+                           bins=50)[0]
+    results['JSD']['TICA-0,1'] = float(jensenshannon(ref_p.flatten(),
+                                                       gen_p.flatten()))
+
+    # --- Decorrelation (torsion + TICA autocorrelation) ---
+    if compute_decorr and mode == 'conditional':
+        from statsmodels.tsa.stattools import acovf
+
+        nlag_ref = min(100_000, ref_ang.shape[0] - 1)
+        nlag_gen = min(1000, gen_ang.shape[0] - 1)
+
+        results['md_decorrelation'] = {}
+        results['our_decorrelation'] = {}
+        for i, feat in enumerate(labels):
+            for src, data, nl, key in [
+                ('md', ref_ang, nlag_ref, 'md_decorrelation'),
+                ('our', gen_ang, nlag_gen, 'our_decorrelation'),
+            ]:
+                ac = (acovf(np.sin(data[:, i]), demean=False, adjusted=True, nlag=nl)
+                      + acovf(np.cos(data[:, i]), demean=False, adjusted=True, nlag=nl))
+                baseline = np.sin(data[:, i]).mean()**2 + np.cos(data[:, i]).mean()**2
+                results[key][feat] = ((ac - baseline) / (1 - baseline + 1e-8)).astype(np.float16)
+
+        # TICA decorrelation
+        ac_ref = acovf(ref_tica[:, 0], nlag=nlag_ref, adjusted=True, demean=False)
+        results['md_decorrelation']['tica'] = ac_ref.astype(np.float16)
+        ac_gen = acovf(gen_tica[:, 0], nlag=nlag_gen, adjusted=True, demean=False)
+        results['our_decorrelation']['tica'] = ac_gen.astype(np.float16)
+
+    return results
+
 
 def run_mdgen_analysis(ref_dir: str, gen_dir: str, protein: str,
                        mode: str = 'conditional',
                        out_dir: str = 'outputs/eval',
                        plot: bool = True) -> str:
-    """Call MDGen's analyze_peptide_sim.py on the prepared PDB/XTC files.
-
-    Args:
-        ref_dir:  Directory with {protein}.pdb/.xtc (reference)
-        gen_dir:  Directory with {protein}.pdb/.xtc (generated)
-        protein:  Protein name
-        mode:     'conditional' or 'unconditional'
-        out_dir:  Where to save results
-        plot:     Generate plots
+    """Run evaluation metrics: tries pyemma (MDGen script), falls back to deeptime.
 
     Returns:
         Path to the saved .pkl results file.
     """
-    script = os.path.join(
-        os.path.dirname(__file__), '..', 'extern', 'mdgen', 'scripts',
-        'analyze_peptide_sim.py')
-    script = os.path.abspath(script)
+    import pickle
 
     save_name = 'eval_results.pkl'
-
-    cmd = [
-        sys.executable, script,
-        '--mddir', ref_dir,
-        '--pdbdir', gen_dir,
-        '--pdb_id', protein,
-        '--save',
-        '--save_name', save_name,
-        '--no_msm',           # skip MSM/TPS (not needed)
-    ]
-
-    if mode == 'unconditional':
-        cmd.append('--no_decorr')  # i.i.d. samples have no temporal structure
-
-    if plot:
-        cmd.append('--plot')
-
-    print(f'Running: {" ".join(cmd)}')
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f'MDGen analysis failed (exit {result.returncode}).\n'
-            f'stderr: {result.stderr}')
-
     pkl_path = os.path.join(gen_dir, save_name)
+
+    if _has_pyemma():
+        script = os.path.join(
+            os.path.dirname(__file__), '..', 'extern', 'mdgen', 'scripts',
+            'analyze_peptide_sim.py')
+        script = os.path.abspath(script)
+
+        cmd = [
+            sys.executable, script,
+            '--mddir', ref_dir,
+            '--pdbdir', gen_dir,
+            '--pdb_id', protein,
+            '--save',
+            '--save_name', save_name,
+            '--no_msm',
+        ]
+        if mode == 'unconditional':
+            cmd.append('--no_decorr')
+        if plot:
+            cmd.append('--plot')
+
+        print(f'Running: {" ".join(cmd)}')
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f'MDGen analysis failed (exit {result.returncode}).\n'
+                f'stderr: {result.stderr}')
+    else:
+        print('pyemma not available — using deeptime + mdtraj fallback')
+        results = run_analysis_deeptime(
+            ref_dir, gen_dir, protein, mode=mode,
+            compute_decorr=(mode == 'conditional'))
+        all_results = {protein: results}
+        with open(pkl_path, 'wb') as f:
+            pickle.dump(all_results, f)
+
     return pkl_path
 
 
