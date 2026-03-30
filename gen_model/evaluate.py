@@ -486,12 +486,32 @@ def print_summary(pkl_path: str, mode: str, validity: dict = None):
     print('=' * 60)
 
 
-def plot_summary(pkl_path: str, out_dir: str, protein: str, mode: str):
+def _integrated_relaxation_times(decorr_dict: dict, dt_ns: float) -> dict:
+    """Compute integrated autocorrelation time for each torsion.
+
+    τ = dt × Σ_{k=0}^{K*} C(k), truncated at first zero crossing.
+    Returns dict {feat: tau_ns}.
+    """
+    taus = {}
+    for feat, ac in decorr_dict.items():
+        if feat == 'tica':
+            continue
+        ac = ac.astype(np.float32)
+        # Truncate at first zero crossing (or end)
+        zeros = np.where(ac <= 0)[0]
+        K = int(zeros[0]) if len(zeros) > 0 else len(ac)
+        taus[feat] = float(np.sum(ac[:K]) * dt_ns)
+    return taus
+
+
+def plot_summary(pkl_path: str, out_dir: str, protein: str, mode: str,
+                 dt_ns: float = 0.1):
     """Generate and save evaluation plots from the results pickle.
 
-    Produces two figures saved as PNGs in out_dir:
-      eval_tica.png   — TICA 1D histogram + 2D landscape (ref vs gen) + JSD bar chart
-      eval_autocorr.png — mean backbone torsion autocorrelation + TICA-0 autocorrelation
+    Produces three figures saved as PNGs in out_dir:
+      eval_tica.png       — TICA 1D histogram + 2D landscape (ref vs gen) + JSD bar chart
+      eval_autocorr.png   — mean backbone torsion autocorrelation + TICA-0 autocorrelation
+      eval_relaxation.png — torsional relaxation timescale scatter (MD vs generated, log-log)
     """
     import pickle
     import matplotlib
@@ -670,6 +690,51 @@ def plot_summary(pkl_path: str, out_dir: str, protein: str, mode: str):
     plt.close(fig2)
     print(f'Saved autocorrelation plot → {autocorr_path}')
 
+    # ------------------------------------------------------------------ #
+    # Figure 3: Torsional relaxation timescale scatter (log-log)         #
+    # Mirrors STAR-MD paper Fig. F: τ_MD (x) vs τ_gen (y) per torsion   #
+    # ------------------------------------------------------------------ #
+    tau_md  = _integrated_relaxation_times(md_dec,  dt_ns)
+    tau_gen = _integrated_relaxation_times(our_dec, dt_ns)
+
+    common = sorted(set(tau_md) & set(tau_gen))
+    if common:
+        x = np.array([tau_md[k]  for k in common], dtype=np.float32)
+        y = np.array([tau_gen[k] for k in common], dtype=np.float32)
+
+        # Only keep pairs where both are positive (zero-crossing found)
+        valid = (x > 0) & (y > 0)
+        x, y = x[valid], y[valid]
+
+        fig3, ax = plt.subplots(figsize=(5, 5))
+        ax.scatter(x, y, s=10, alpha=0.5, color='steelblue', edgecolors='none')
+
+        # Diagonal reference
+        vmin = min(x.min(), y.min()) * 0.5
+        vmax = max(x.max(), y.max()) * 2.0
+        ax.plot([vmin, vmax], [vmin, vmax], 'k--', lw=0.8)
+
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlim(vmin, vmax)
+        ax.set_ylim(vmin, vmax)
+        ax.set_xlabel('MD relaxation time (ns)')
+        ax.set_ylabel('Generated relaxation time (ns)')
+        ax.set_title(f'{protein} — Torsional relaxation')
+
+        if len(x) >= 2:
+            from scipy.stats import pearsonr
+            r, _ = pearsonr(np.log(x), np.log(y))
+            ax.text(0.05, 0.93, f'r={r:.2f}  n={len(x)}',
+                    transform=ax.transAxes, fontsize=10,
+                    color='steelblue', fontweight='bold')
+
+        fig3.tight_layout()
+        relax_path = os.path.join(out_dir, 'eval_relaxation.png')
+        fig3.savefig(relax_path, dpi=120, bbox_inches='tight')
+        plt.close(fig3)
+        print(f'Saved relaxation scatter → {relax_path}')
+
     return tica_path
 
 
@@ -705,6 +770,8 @@ def main():
     parser.add_argument('--out_dir',    type=str, default='outputs/eval')
     parser.add_argument('--coord_scale', type=float, default=0.1,
                         help='Scale used during training (default 0.1); must match inference')
+    parser.add_argument('--dt_ns',      type=float, default=0.1,
+                        help='Physical time between frames in ns (default 0.1)')
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -790,7 +857,8 @@ def main():
     print_summary(pkl_path, args.mode, validity)
 
     if not args.no_plot:
-        plot_summary(pkl_path, gen_traj_dir, args.protein, args.mode)
+        plot_summary(pkl_path, gen_traj_dir, args.protein, args.mode,
+                     dt_ns=args.dt_ns)
 
 
 if __name__ == '__main__':
