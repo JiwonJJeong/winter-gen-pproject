@@ -114,7 +114,11 @@ class StarScoreNetwork(nn.Module):
         if multi_frame:
             B, L, N, _ = input_feats['rigids_t'].shape
             sc_ca_t  = input_feats['sc_ca_t']                   # [B, L, N, 3]
-            frame_idx = input_feats.get('frame_idx', None)      # [L] int tensor or None
+            frame_idx = input_feats.get('frame_idx', None)
+            # DataLoader collates [L] → [B, L]; extract first item since
+            # frame indices are the same across the batch.
+            if frame_idx is not None and frame_idx.ndim == 2:
+                frame_idx = frame_idx[0]                          # [L]
 
             node_embeds, edge_embeds = [], []
             for l in range(L):
