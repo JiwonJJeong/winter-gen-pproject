@@ -42,7 +42,10 @@ class LoRALinear(nn.Module):
             base.bias.requires_grad_(False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.base(x) + F.linear(x, self.lora_B @ self.lora_A) * (self.alpha / self.r)
+        # Two sequential small matmuls (O(r·d)) instead of materialising the full
+        # (d_out × d_in) product matrix B @ A at every forward call (O(d²)).
+        lora_out = F.linear(F.linear(x, self.lora_A), self.lora_B)
+        return self.base(x) + lora_out * (self.alpha / self.r)
 
     # Expose base properties so code that inspects .weight/.bias still works
     @property

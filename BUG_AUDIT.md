@@ -45,13 +45,20 @@ No bugs in Category 1. All extern API calls are correct. Code smell in `_apply_s
 
 ---
 
-## Category 3 — Loss & Training Loop
-Silent loss bugs that don't crash but train the wrong thing.
+## Category 3 — Loss & Training Loop ✅ AUDITED
 
-| File | What to check |
+### Results
+
+| File | Finding |
 |---|---|
-| `gen_model/se3_diffusion_module.py` | Rot/trans/psi loss normalization; EMA hook timing (known fix); aux loss wiring |
-| `gen_model/models/lora.py` | LoRA weight initialization; whether grad-frozen base weights are truly frozen |
+| `gen_model/se3_diffusion_module.py` | Clean. Rot-loss `n_rot` normalization correctly counts only (visible × t<threshold) tokens. Trans/psi shapes correct for both single- and multi-frame. Aux losses correctly gated by `'atom37' in pred` (absent for multi-frame). EMA `on_train_batch_end` correctly fires post-optimizer-step. |
+| `gen_model/models/lora.py` | **BUG FIXED** — see below. Base weights frozen correctly; `freeze_non_lora` walk is correct. |
+
+### Bug Fixed: LoRA forward materializes full weight matrix (Minor/Efficiency)
+
+**Root cause**: `LoRALinear.forward` computed `F.linear(x, self.lora_B @ self.lora_A)`, which first materializes the full `(d_out × d_in)` product matrix at every forward call. This is O(d²) memory and compute — the exact overhead LoRA is designed to avoid.
+
+**Fix** (`gen_model/models/lora.py`): replaced with two sequential small matmuls `F.linear(F.linear(x, self.lora_A), self.lora_B)`, which is O(r·d) and never allocates a full-rank intermediate. Mathematically identical.
 
 ---
 
@@ -100,7 +107,7 @@ Check that tests actually catch the bugs they claim to cover.
 
 - [x] Category 1 — Diffusion Math (clean — no bugs)
 - [x] Category 2 — STAR Model Architecture (1 bug fixed: frame_idx RoPE mismatch)
-- [ ] Category 3 — Loss & Training Loop
+- [x] Category 3 — Loss & Training Loop (1 bug fixed: LoRA O(d²) forward)
 - [ ] Category 4 — Data Pipeline
 - [ ] Category 5 — Inference
 - [ ] Category 6 — Tests
