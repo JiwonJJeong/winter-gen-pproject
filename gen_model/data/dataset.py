@@ -408,7 +408,7 @@ class ConditionalMDGenDataset(MDGenDataset):
         torsion_angles_sin_cos  [L, N, 7, 2] torsion angles for all frames
         sc_ca_t                 [L, N, 3]    per-frame self-conditioning CA:
                                              sc_ca_t[0]=0, sc_ca_t[l]=CA of frame l-1
-        frame_idx               [L]          absolute frame positions (for RoPE2D)
+        frame_idx               [L]          relative window positions [0,1,...,L-1] (for RoPE2D)
         delta_t                 scalar       actual physical stride in ns
         res_mask                [N]          spatial crop mask (same for all frames)
         aatype / seq_idx / fixed_mask / chain_idx  [N] or scalar
@@ -526,7 +526,12 @@ class ConditionalMDGenDataset(MDGenDataset):
             'torsion_angles_sin_cos':   torsions_L,                      # [L, N, 7, 2]
             'sc_ca_t':                  sc_ca_t,                         # [L, N, 3]
             # Temporal metadata for STAR-MD
-            'frame_idx':                torch.tensor(frame_idx_arr, dtype=torch.long),  # [L]
+            # Use relative window positions [0, 1, ..., L-1] so that the RoPE
+            # position differences between adjacent frames are always 1 at training
+            # time, matching the sequential generation steps used at inference
+            # (frame_abs = 0, 1, 2, ...).  The physical stride is communicated to
+            # the model via delta_t / AdaLN conditioning, not via frame_idx.
+            'frame_idx':                torch.arange(L, dtype=torch.long),             # [L]
             'delta_t':                  torch.tensor(delta_t_act, dtype=torch.float32),
             # Normalization metadata
             'centroid':                 centroid,
