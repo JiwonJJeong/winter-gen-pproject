@@ -1,56 +1,30 @@
 # STAR-MD: Spatio-Temporal Attention for Protein MD Trajectory Generation
 
-This repository extends three prior works — **SE(3)-Diffusion**, **MDGen**, and **SinFusion** — to generate realistic protein molecular dynamics (MD) trajectories using SE(3) diffusion with spatio-temporal attention across frames.
+Generates realistic protein MD trajectories by combining **SE(3) score-matching diffusion** with joint spatio-temporal attention across frames, trained on a single MD trajectory following the **SinFusion** single-trajectory protocol.
 
 ---
 
-## What this repo does differently
-
-### Prior works
+## Prior works
 
 | Work | What it does |
 |------|-------------|
 | [SE(3)-Diffusion (Yim et al., 2023)](https://arxiv.org/abs/2302.02277) | SE(3) score-matching diffusion on protein backbones; single-structure generation |
 | [MDGen (Jing et al., 2024)](https://arxiv.org/abs/2407.01791) | Extends SE(3)-Diffusion to multi-frame MD trajectories via conditional generation |
-| [SinFusion (Nikankin et al., 2022)](https://arxiv.org/abs/2211.11743) | Single-video/image diffusion with temporal curriculum and SinFusion training pattern |
+| [SinFusion (Nikankin et al., 2022)](https://arxiv.org/abs/2211.11743) | Single-video/image diffusion with virtual epochs, curriculum, and spatial augmentation |
 
-### Contributions of this repo
+This repo combines all three: the STAR-MD architecture (joint ST attention, 2D-RoPE, AdaLN, block-causal masking) trained with SinFusion's single-trajectory protocol on SE(3) rigid frames.
 
-**1. STAR-MD: SpatioTemporalAttention module (`gen_model/models/star_attention.py`)**
+---
 
-Adds a cross-frame attention layer between IPA blocks so the model can reason across multiple MD frames jointly rather than frame-by-frame:
+## Setup
 
-- **RoPE2D** (`gen_model/models/rope2d.py`): 2D rotary position embeddings encoding both residue index and frame index simultaneously, replacing 1D sinusoidal embeddings.
-- **AdaLN** (`gen_model/models/adaln.py`): Adaptive Layer Normalization conditioned on diffusion time `t` and temporal gap `Δt = k·stride` (zero-initialized shift/scale, matching DiT-style conditioning).
-- **Block-causal masking**: Attention is causal over frames (frame `i` attends only to frames `≤ i`) but fully connected within each frame, enabling autoregressive trajectory rollout.
+```bash
+git clone --recurse-submodules <this-repo>
+conda env create -f installation.yaml
+conda activate star-md
+```
 
-**2. StarIpaScore (`gen_model/models/star_ipa.py`)**
-
-A non-invasive subclass of the upstream `IpaScore` (from SE(3)-Diffusion) that injects `SpatioTemporalAttention` blocks between IPA trunk layers after `super().__init__()`. The upstream code is untouched — all STAR-MD logic lives in this extension file.
-
-**3. SinFusion-style training (`gen_model/se3_diffusion_module.py`)**
-
-Adopts SinFusion's training algorithm structure:
-
-- `forward()` owns the complete pipeline: sample `t` → SE(3) forward marginal → model → score loss (analogous to SinFusion's `q_sample + MSE` in one method)
-- `SE3Diffuser.forward_marginal()` is the exact analog of DDPM's `q_sample` — a one-shot closed-form marginal over SO(3) × R³
-- `CosineAnnealingLR` (step-based, `eta_min = lr * 0.01`) replaces MultiStepLR
-- `max_steps` instead of `max_epochs`
-- Diffusion noise is applied in the Lightning module's `forward()`, not in the dataset — clean separation of data loading from diffusion
-
-**4. Two-stage training with temporal curriculum**
-
-Mirrors SinFusion's frame-difference curriculum:
-- **Stage 1** (unconditional): Train on single frames with no temporal conditioning
-- **Stage 2** (conditional): Start with `k ∈ {±1}`, growing to `k ∈ {±1, ±2, ±3}` every `grow_every` epochs via `TemporalCurriculumCallback`
-
-**5. IPF spatial cropping**
-
-Following MDGen, training uses Iterative Proportional Fitting (IPF)-balanced spatial crops so that each residue appears with uniform probability across the training distribution — a 3D analog of SinFusion's random spatial crops on images.
-
-**6. LoRA fine-tuning support**
-
-LoRA adapters can be applied to IPA attention projections (`linear_q`, `linear_kv`, `linear_out`) and STAR-MD projections (`q_proj`, `k_proj`, `v_proj`, `out_proj`) for parameter-efficient fine-tuning on new MD datasets.
+The `extern/` submodules are read-only. Do not commit into them.
 
 ---
 
@@ -59,98 +33,171 @@ LoRA adapters can be applied to IPA attention projections (`linear_q`, `linear_k
 ```
 winter-gen-pproject/
 ├── extern/                          # Read-only upstream submodules
-│   ├── se3_diffusion/               # Yim et al. 2023 (SE3-Diffusion)
-│   ├── mdgen/                       # Jing et al. 2024 (MDGen)
-│   └── sinfusion/                   # Nikankin et al. 2022 (SinFusion)
+│   ├── se3_diffusion/               # Yim et al. 2023
+│   ├── mdgen/                       # Jing et al. 2024
+│   └── sinfusion/                   # Nikankin et al. 2022
 │
 ├── gen_model/
-│   ├── path_setup.py                # Adds extern/ dirs to sys.path
+│   ├── path_setup.py                # Adds extern/ to sys.path; patches upstream dtype bugs
 │   │
 │   ├── models/
-│   │   ├── rope2d.py                # 2D RoPE for (residue, frame) positions
-│   │   ├── adaln.py                 # AdaLN conditioned on (t, Δt)
-│   │   ├── star_attention.py        # SpatioTemporalAttention with block-causal mask
+│   │   ├── star_score_network.py    # StarScoreNetwork: Embedder + StarIpaScore
 │   │   ├── star_ipa.py              # StarIpaScore: non-invasive IpaScore extension
-│   │   ├── score_network.py         # Shim → extern/se3_diffusion/model/score_network.py
+│   │   ├── star_attention.py        # SpatioTemporalAttention (block-causal, 2D-RoPE, KV-cache)
+│   │   ├── rope2d.py                # 2D Rotary Position Embedding (residue × frame)
+│   │   ├── adaln.py                 # Adaptive Layer Normalization conditioned on (t, Δt)
+│   │   ├── score_network.py         # Shim → extern/se3_diffusion ScoreNetwork
 │   │   └── lora.py                  # LoRA adapter injection
 │   │
 │   ├── diffusion/
-│   │   ├── se3_diffuser.py          # Shim → extern/se3_diffusion/data/se3_diffuser.py
-│   │   ├── so3_diffuser.py          # Shim → extern/se3_diffusion/data/so3_diffuser.py
-│   │   └── r3_diffuser.py           # Shim → extern/se3_diffusion/data/r3_diffuser.py
+│   │   ├── se3_diffuser.py          # Shim → extern/se3_diffusion SE3Diffuser
+│   │   ├── so3_diffuser.py          # Shim → extern/se3_diffusion SO3Diffuser
+│   │   └── r3_diffuser.py           # Shim → extern/se3_diffusion R3Diffuser
 │   │
 │   ├── data/
-│   │   └── dataset.py               # MDGenDataset + ConditionalMDGenDataset (modified from MDGen)
+│   │   ├── dataset.py               # MDGenDataset + ConditionalMDGenDataset
+│   │   ├── geometry.py              # atom14↔atom37↔frames, torsion extraction
+│   │   ├── all_atom.py              # Backbone reconstruction from frames + psi
+│   │   └── residue_constants.py     # Amino acid geometry constants
 │   │
-│   ├── se3_diffusion_module.py      # Lightning modules (SinFusion-style training)
-│   ├── train_base.py                # Shared config helpers
+│   ├── se3_diffusion_module.py      # Lightning modules (SE3Diffusion, ConditionalSE3Diffusion)
+│   ├── train_base.py                # Shared config helpers (default_se3_conf, default_model_conf)
 │   ├── train_unconditional.py       # Stage 1 training
-│   ├── train_conditional.py         # Stage 2 training with curriculum
+│   ├── train_conditional.py         # Stage 2 training with δt curriculum
+│   ├── inference_unconditional.py   # Sample conformations from noise
+│   ├── inference_conditional.py     # Autoregressive trajectory rollout
+│   ├── evaluate.py                  # Evaluation suite (torsion JSD, TICA, autocorrelation)
 │   │
 │   └── splits/
-│       ├── atlas.csv                # Protein metadata
-│       └── frame_splits.csv         # Train/val/test frame assignments
+│       ├── atlas.csv                # Protein name → sequence
+│       └── frame_splits.csv         # Train/val/test frame boundaries
 │
-└── checkpoints/
-    ├── unconditional/               # Stage 1 checkpoints
-    └── conditional/                 # Stage 2 checkpoints
+├── checkpoints/
+│   ├── unconditional/               # Stage 1 checkpoints
+│   └── conditional/                 # Stage 2 checkpoints
+│
+└── installation.yaml                # Conda environment
 ```
 
 ---
 
-## Usage
+## Training
 
-**Stage 1 — unconditional single-frame training:**
+### Stage 1 — unconditional (single-frame score matching)
+
 ```bash
 python gen_model/train_unconditional.py \
+    --protein 4o66_C \
+    --replica 1 \
     --data_dir data \
     --max_steps 200000 \
-    --batch_size 8 \
-    --lr 1e-4
-```
-
-**Stage 2 — conditional multi-frame training with curriculum:**
-```bash
-python gen_model/train_conditional.py \
-    --data_dir data \
-    --max_steps 200000 \
-    --batch_size 8 \
+    --batch_size 1 \
     --lr 1e-4 \
-    --max_k 3 \
-    --grow_every 10
+    --ema_decay 0.999
 ```
 
-**With LoRA (parameter-efficient fine-tuning):**
+### Stage 2 — conditional (multi-frame, Diffusion Forcing)
+
 ```bash
 python gen_model/train_conditional.py \
+    --protein 4o66_C \
+    --replica 1 \
     --data_dir data \
-    --lora_r 8 \
-    --lora_alpha 16
+    --max_steps 200000 \
+    --num_frames 16 \
+    --ns_per_stored_frame 0.1 \
+    --curriculum
 ```
 
-**With STAR-MD spatio-temporal attention:**
-```bash
-python gen_model/train_conditional.py \
-    --data_dir data \
-    --star_enabled   # (wire via default_model_conf star_enabled=True)
-```
+Key Stage 2 flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--num_frames` | 8 | Window size L (frames per training sample) |
+| `--ns_per_stored_frame` | 0.1 | Physical time per stored MD frame (ns) |
+| `--curriculum` / `--no_curriculum` | on | δt curriculum: [0.01,0.1] → [0.01,1.0] → [0.01,10.0] ns |
+| `--star_enabled` / `--no_star` | on | Enable spatio-temporal attention blocks |
+| `--st_num_heads` | 8 | Number of attention heads in ST blocks |
+| `--spatial_sigma` | 0.0 | Gaussian spatial bias in ST attention (0 = disabled) |
+| `--lora_r` | 0 | LoRA rank (0 = no LoRA, full fine-tune) |
+| `--lora_alpha` | 0.0 | LoRA alpha scaling |
+| `--grad_clip` | 1.0 | Gradient norm clip |
+| `--ema_decay` | 0.999 | EMA weight decay (0 = disabled) |
+| `--warmup_steps` | 0 | Linear LR warmup steps |
+| `--virtual_epoch_size` | 5000 | Samples per virtual epoch (SinFusion anti-overfit) |
 
 ---
 
-## Setup
+## Inference
+
+### Conditional — autoregressive trajectory rollout
 
 ```bash
-git clone --recurse-submodules <this-repo>
-pip install -r requirements.txt
+python gen_model/inference_conditional.py \
+    --checkpoint checkpoints/conditional/last.ckpt \
+    --data_dir data \
+    --protein 4o66_C \
+    --output generated_traj.pt \
+    --total_frames 250 \
+    --delta_t 0.1 \
+    --n_steps 150
 ```
 
-The `extern/` submodules are read-only references to upstream repos. Do not commit changes into them.
+Output: `[T, N, 7]` tensor of backbone rigid frames (quaternion + translation, coordinate-scaled).
+
+### Unconditional — sample conformations from noise
+
+```bash
+python gen_model/inference_unconditional.py \
+    --checkpoint checkpoints/unconditional/last.ckpt \
+    --npy_path data/4o66_C/4o66_C_R1_latent.npy \
+    --protein_name 4o66_C \
+    --num_samples 100 \
+    --out_dir outputs/unconditional
+```
+
+Output: `[num_samples, N, 3]` CA coordinates in Ångströms.
+
+---
+
+## Evaluation
+
+```bash
+python gen_model/evaluate.py \
+    --ref_npy "data/4o66_C/4o66_C_R1_latent.npy data/4o66_C/4o66_C_R2_latent.npy" \
+    --gen_traj outputs/generated_traj.pt \
+    --protein 4o66_C \
+    --mode conditional
+```
+
+Metrics follow the MDGen/ATLAS protocol:
+
+| Metric | What it measures |
+|--------|-----------------|
+| Torsion JSD | φ/ψ/ω and χ1-4 dihedral distributions |
+| 2D φ-ψ JSD | Joint Ramachandran divergence |
+| TICA JSD | Slow collective motion distribution |
+| Autocorrelation | Temporal decorrelation of torsion/TICA (conditional only) |
+
+---
+
+## Architecture
+
+**SpatioTemporalAttention** (`gen_model/models/star_attention.py`) injects one cross-frame attention block after each IPA block:
+- **Block-causal mask**: frame ℓ attends only to frames ≤ ℓ, enabling autoregressive rollout
+- **2D-RoPE** (`rope2d.py`): encodes (residue index, frame index) jointly in Q and K
+- **AdaLN** (`adaln.py`): input normalization conditioned on diffusion time `t` and stride `Δt`
+- **KV-cache**: context frames cached once at inference; only the target frame processed per denoising step
+
+**StarIpaScore** (`gen_model/models/star_ipa.py`) non-invasively subclasses the upstream `IpaScore`, injecting ST attention blocks without modifying `extern/`.
+
+**Two-stage training**:
+1. Unconditional: score-match single frames → learns SE(3) backbone geometry
+2. Conditional: multi-frame windows with Diffusion Forcing → learns temporal dynamics
 
 ---
 
 ## Citation
-
-If you use this code, please cite the upstream works this builds on:
 
 ```bibtex
 @article{yim2023se3,
@@ -158,13 +205,11 @@ If you use this code, please cite the upstream works this builds on:
   author={Yim, Jason and others},
   journal={arXiv:2302.02277}, year={2023}
 }
-
 @article{jing2024mdgen,
   title={Generative modeling of protein ensemble from single sequence},
   author={Jing, Bowen and others},
   journal={arXiv:2407.01791}, year={2024}
 }
-
 @article{nikankin2022sinfusion,
   title={SinFusion: Training diffusion models on a single image or video},
   author={Nikankin, Yaniv and others},
