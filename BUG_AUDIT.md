@@ -62,13 +62,24 @@ No bugs in Category 1. All extern API calls are correct. Code smell in `_apply_s
 
 ---
 
-## Category 4 — Data Pipeline
-Frame indexing, stride, and cropping bugs cause subtle distributional errors.
+## Category 4 — Data Pipeline ✅ AUDITED
 
-| File | What to check |
+### Results
+
+| File | Finding |
 |---|---|
-| `gen_model/data/dataset.py` | `ConditionalMDGenDataset` window boundaries; `delta_t` LogUniform sampling; IPF-balanced crop correctness |
-| `gen_model/data/geometry.py` | atom14↔atom37 conversions; torsion angle computation edge cases |
+| `gen_model/data/geometry.py` | Clean. `atom14↔atom37` conversions, torsion angle extraction (MDGen-derived), and `atom14_to_frames` are all correct. |
+| `gen_model/data/dataset.py` | **BUG FIXED** — see below. IPF crop + delta_t sampling + window boundary logic are clean. |
+
+### Bug Fixed: `ConditionalMDGenDataset.__getitem__` virtual-epoch index mismatch (Medium)
+
+**Root cause**: `MDGenDataset.__getitem__` rebinds its local `idx` to a random real index when `_virtual_epoch_size > 0`. `ConditionalMDGenDataset.__getitem__` called `super().__getitem__(idx)` (parent silently re-samples) then continued to use the **original** DataLoader `idx` for `self.frame_index[idx]`.
+
+Two consequences:
+1. **IndexError** when `_virtual_epoch_size > len(self.frame_index)` — DataLoader passes `idx` values up to `_virtual_epoch_size - 1`, which exceed `len(frame_index) - 1`, crashing on `self.frame_index[idx]`.
+2. **Silent data mismatch** otherwise — `anchor` (centroid, res_mask) comes from a random frame while the window is built around a different frame. Centroid used to scale the window coordinates is wrong.
+
+**Fix** (`gen_model/data/dataset.py`): resolve the virtual epoch sampling at the top of `ConditionalMDGenDataset.__getitem__`, then temporarily set `_virtual_epoch_size = 0` before calling `super().__getitem__` to prevent the parent from doing a second independent re-sample.
 
 ---
 
@@ -108,6 +119,6 @@ Check that tests actually catch the bugs they claim to cover.
 - [x] Category 1 — Diffusion Math (clean — no bugs)
 - [x] Category 2 — STAR Model Architecture (1 bug fixed: frame_idx RoPE mismatch)
 - [x] Category 3 — Loss & Training Loop (1 bug fixed: LoRA O(d²) forward)
-- [ ] Category 4 — Data Pipeline
+- [x] Category 4 — Data Pipeline (1 bug fixed: virtual-epoch index mismatch)
 - [ ] Category 5 — Inference
 - [ ] Category 6 — Tests

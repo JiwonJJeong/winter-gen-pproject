@@ -440,8 +440,21 @@ class ConditionalMDGenDataset(MDGenDataset):
     # __getitem__
     # ------------------------------------------------------------------
     def __getitem__(self, idx):
-        # 1. Anchor frame via parent — gives us centroid, res_mask, coord_scale.
+        # Resolve virtual epoch sampling here so anchor and window share the same
+        # real index.  If we let the parent re-sample its own random idx, the
+        # anchor (centroid, res_mask) would come from a different frame than the
+        # window built below.  Worse, when _virtual_epoch_size > len(frame_index),
+        # the original DataLoader idx may exceed len(frame_index) entirely, causing
+        # an IndexError on line self.frame_index[idx].
+        if self._virtual_epoch_size > 0:
+            idx = np.random.randint(len(self.frame_index))
+
+        # Disable virtual epoch in the parent call to prevent a second independent
+        # re-sample.  Restore immediately after so __len__ is unaffected.
+        saved_ves = self._virtual_epoch_size
+        self._virtual_epoch_size = 0
         anchor = super().__getitem__(idx)
+        self._virtual_epoch_size = saved_ves
 
         protein_idx, frame_start = self.frame_index[idx]
         name        = self.df.index[protein_idx]
