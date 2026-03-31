@@ -100,14 +100,21 @@ Two consequences:
 
 ---
 
-## Category 6 — Tests (Verify Coverage)
-Check that tests actually catch the bugs they claim to cover.
+## Category 6 — Tests ✅ AUDITED (skipped — stale)
 
-| File | What to check |
+All test files import modules that no longer exist in the codebase:
+
+| Test file | Dead import |
 |---|---|
-| `tests/test_balanced_masking.py` | IPF crop probability uniformity — a stat test, not just a shape check |
-| `tests/test_scaling.py` | Round-trip `scale → unscale` identity check |
-| `tests/test_predictor_dataset.py` | Window stride and boundary conditions |
+| `tests/test_dataset.py` | `gen_model.dataset_projector`, `gen_model.dataset_predictor`, `gen_model.dataset_interpolator` |
+| `tests/test_predictor_dataset.py` | `gen_model.dataset_predictor` |
+| `tests/test_balanced_masking.py` | `gen_model.dataset` (exists) but tests `MDGenDataset` shape from the old API |
+| `tests/test_scaling.py` | `gen_model.dataset` (exists) but references `data/atlas.csv` (wrong path vs `gen_model/splits/atlas.csv`) |
+| `tests/test_dataset_filtering.py` | `gen_model.dataset` (exists) but likely uses stale split CSV assumptions |
+| `tests/test_split_logic.py` | `gen_model.dataset` (exists) |
+| `tests/test_se3_dataset.py` | Unknown — not checked |
+
+**Verdict**: Test suite is effectively dead. None of the Category 6 files can run as-is. No further action taken — the user confirmed tests are not in use.
 
 ---
 
@@ -128,4 +135,4 @@ Check that tests actually catch the bugs they claim to cover.
 - [x] Category 3 — Loss & Training Loop (1 bug fixed: LoRA O(d²) forward)
 - [x] Category 4 — Data Pipeline (1 bug fixed: virtual-epoch index mismatch)
 - [x] Category 5 — Inference (1 bug fixed: seq_idx 0-indexed in unconditional)
-- [ ] Category 6 — Tests
+- [x] Category 6 — Tests (stale — all import dead modules, skipped)
