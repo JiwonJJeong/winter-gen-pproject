@@ -1,6 +1,6 @@
-# STAR-MD: Spatio-Temporal Attention for Protein MD Trajectory Generation
+# Generative AI for Protein MD Trajectory Generation from a Single Training Trajectory
 
-Generates realistic protein MD trajectories by combining **SE(3) score-matching diffusion** with joint spatio-temporal attention across frames, trained on a single MD trajectory following the **SinFusion** single-trajectory protocol.
+Trains a generative model of protein backbone dynamics from **a single MD trajectory**, then samples new trajectories that match the equilibrium distribution and temporal dynamics of that protein. Combines the **STAR-MD** spatio-temporal attention architecture with **SinFusion**'s single-trajectory training protocol on **SE(3) score-matching diffusion**.
 
 ---
 
@@ -12,7 +12,7 @@ Generates realistic protein MD trajectories by combining **SE(3) score-matching 
 | [MDGen (Jing et al., 2024)](https://arxiv.org/abs/2407.01791) | Extends SE(3)-Diffusion to multi-frame MD trajectories via conditional generation |
 | [SinFusion (Nikankin et al., 2022)](https://arxiv.org/abs/2211.11743) | Single-video/image diffusion with virtual epochs, curriculum, and spatial augmentation |
 
-This repo combines all three: the STAR-MD architecture (joint ST attention, 2D-RoPE, AdaLN, block-causal masking) trained with SinFusion's single-trajectory protocol on SE(3) rigid frames.
+This repo adapts all three to the single-trajectory regime: the STAR-MD architecture (joint ST attention, 2D-RoPE, AdaLN, block-causal masking) trained with SinFusion's anti-overfitting protocol (virtual epochs, spatial crops, δt curriculum) on SE(3) rigid frames.
 
 ---
 
