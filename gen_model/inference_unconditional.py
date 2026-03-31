@@ -61,7 +61,7 @@ def run_reverse_sde(
     res_mask_b  = res_mask.unsqueeze(0).to(device)
     fixed_mask  = torch.zeros_like(res_mask_b)
     aatype_b    = aatype.unsqueeze(0).to(device)
-    seq_idx_b   = torch.arange(N, device=device).unsqueeze(0)
+    seq_idx_b   = torch.arange(1, N + 1, device=device).unsqueeze(0)
     chain_idx_b = torch.zeros(1, N, dtype=torch.long, device=device)
 
     for t_val in tqdm(ts[:-1], desc='Reverse SDE'):
@@ -138,7 +138,7 @@ def run_sdedit_step(
     res_mask_b  = res_mask.unsqueeze(0).to(device)
     fixed_mask  = torch.zeros_like(res_mask_b)
     aatype_b    = aatype.unsqueeze(0).to(device)
-    seq_idx_b   = torch.arange(N, device=device).unsqueeze(0)
+    seq_idx_b   = torch.arange(1, N + 1, device=device).unsqueeze(0)
     chain_idx_b = torch.zeros(1, N, dtype=torch.long, device=device)
 
     for t_val in tqdm(ts[:-1], desc='Refinement SDE'):

@@ -83,13 +83,20 @@ Two consequences:
 
 ---
 
-## Category 5 — Inference
-Autoregressive rollout bugs produce drifting/degenerate trajectories.
+## Category 5 — Inference ✅ AUDITED
 
-| File | What to check |
+### Results
+
+| File | Finding |
 |---|---|
-| `gen_model/inference_conditional.py` | KV-cache invalidation; frame context window shifting; reverse SDE step correctness |
-| `gen_model/inference_unconditional.py` | Sampling consistency with training noise schedule |
+| `gen_model/inference_conditional.py` | Clean. KV-cache trimming to `num_context - 1` is correct (target + cache = L). `frame_abs` increments give correct relative RoPE diffs after trimming. `sc_ca = history_clean[-1][:, 4:7]` correctly extracts translations as CA proxy. `identity7[:, 0] = 1.0` gives identity quaternion. Reverse SDE step correct. |
+| `gen_model/inference_unconditional.py` | **BUG FIXED** — see below. Reverse SDE dt and noise schedule match training. |
+
+### Bug Fixed: `seq_idx` 0-indexed in unconditional inference (Minor)
+
+**Root cause**: `run_reverse_sde` and `run_sdedit_step` both used `torch.arange(N)` (0-indexed, `[0, 1, ..., N-1]`) for `seq_idx_b`. Training and conditional inference both use `torch.arange(1, N+1)` (1-indexed). The Embedder and RoPE2D residue axis both receive shifted position embeddings at inference vs training.
+
+**Fix** (`gen_model/inference_unconditional.py`): changed both occurrences to `torch.arange(1, N + 1, device=device).unsqueeze(0)`.
 
 ---
 
@@ -120,5 +127,5 @@ Check that tests actually catch the bugs they claim to cover.
 - [x] Category 2 — STAR Model Architecture (1 bug fixed: frame_idx RoPE mismatch)
 - [x] Category 3 — Loss & Training Loop (1 bug fixed: LoRA O(d²) forward)
 - [x] Category 4 — Data Pipeline (1 bug fixed: virtual-epoch index mismatch)
-- [ ] Category 5 — Inference
+- [x] Category 5 — Inference (1 bug fixed: seq_idx 0-indexed in unconditional)
 - [ ] Category 6 — Tests
