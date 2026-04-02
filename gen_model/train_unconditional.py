@@ -55,6 +55,8 @@ def main():
                         help='DataLoader workers')
     parser.add_argument('--virtual_epoch_size', type=int, default=5000,
                         help='Virtual epoch size (SinFusion default: 5000; 0 = use real dataset size)')
+    parser.add_argument('--crop_ratio', type=float, default=0.95,
+                        help='Fraction of residues to keep per crop (SinFusion anti-overfitting: 0.7; MDGen default: 0.95)')
     parser.add_argument('--ckpt_path', type=str, default=None,
                         help='Resume from checkpoint (restores weights, optimizer, step counter)')
     args = parser.parse_args()
