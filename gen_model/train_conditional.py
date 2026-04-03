@@ -95,6 +95,12 @@ def main():
     parser.add_argument('--weights_only', action='store_true',
                         help='Load only weights from --ckpt_path (fresh optimizer + scheduler). '
                              'Use when resuming with a larger max_steps to avoid dead LR.')
+    parser.add_argument('--wandb', action='store_true', default=False,
+                        help='Log to Weights & Biases')
+    parser.add_argument('--wandb_project', type=str, default='winter-gen',
+                        help='W&B project name')
+    parser.add_argument('--wandb_run', type=str, default=None,
+                        help='W&B run name (defaults to protein_replica_cond)')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -176,6 +182,13 @@ def main():
     if early_stop_cb is not None:
         callbacks.append(early_stop_cb)
 
+    wandb_logger = None
+    if args.wandb:
+        from pytorch_lightning.loggers import WandbLogger
+        run_name = args.wandb_run or f'{args.protein}_R{args.replica}_cond'
+        wandb_logger = WandbLogger(project=args.wandb_project, name=run_name, log_model=False)
+        wandb_logger.watch(module, log='all', log_freq=log_freq)
+
     trainer = L.Trainer(
         max_steps=args.max_steps,
         accelerator='auto', devices='auto',
@@ -184,6 +197,7 @@ def main():
         log_every_n_steps=log_freq,
         gradient_clip_val=args.grad_clip,
         accumulate_grad_batches=args.accumulate_grad,
+        logger=wandb_logger if wandb_logger is not None else True,
     )
     resume_ckpt = None if args.weights_only else args.ckpt_path
     trainer.fit(module, train_dataloaders=train_loader, ckpt_path=resume_ckpt)

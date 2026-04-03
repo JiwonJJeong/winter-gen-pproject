@@ -59,6 +59,12 @@ def main():
                         help='Fraction of residues to keep per crop (SinFusion anti-overfitting: 0.7; MDGen default: 0.95)')
     parser.add_argument('--ckpt_path', type=str, default=None,
                         help='Resume from checkpoint (restores weights, optimizer, step counter)')
+    parser.add_argument('--wandb', action='store_true', default=False,
+                        help='Log to Weights & Biases')
+    parser.add_argument('--wandb_project', type=str, default='winter-gen',
+                        help='W&B project name')
+    parser.add_argument('--wandb_run', type=str, default=None,
+                        help='W&B run name (defaults to protein_replica)')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -109,6 +115,14 @@ def main():
     )
     from pytorch_lightning.callbacks import TQDMProgressBar
     log_freq = args.accumulate_grad * 100
+
+    wandb_logger = None
+    if args.wandb:
+        from pytorch_lightning.loggers import WandbLogger
+        run_name = args.wandb_run or f'{args.protein}_R{args.replica}_uncond'
+        wandb_logger = WandbLogger(project=args.wandb_project, name=run_name, log_model=False)
+        wandb_logger.watch(module, log='all', log_freq=log_freq)
+
     trainer = L.Trainer(
         max_steps=args.max_steps,
         accelerator='auto', devices='auto',
@@ -117,6 +131,7 @@ def main():
         log_every_n_steps=log_freq,
         gradient_clip_val=args.grad_clip,
         accumulate_grad_batches=args.accumulate_grad,
+        logger=wandb_logger if wandb_logger is not None else True,
     )
     trainer.fit(module, train_dataloaders=train_loader, ckpt_path=args.ckpt_path)
 
