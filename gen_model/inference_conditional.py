@@ -445,6 +445,234 @@ def rollout_block_ar(
 
 
 # ---------------------------------------------------------------------------
+# Pyramidal / rolling block-AR (staggered per-slot t)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def rollout_pyramid(
+    model: StarScoreNetwork,
+    diffuser,
+    seed_rigids: torch.Tensor,
+    seq_idx: torch.Tensor,
+    res_mask: torch.Tensor,
+    total_frames: int,
+    num_context: int,
+    block_size: int,
+    delta_t: float,
+    n_steps: int,
+    min_t: float,
+    max_t: float,
+    device: str,
+) -> list:
+    """Rolling-diffusion block-AR: K active slots at staggered t values.
+
+    At every denoising step:
+      - Each active slot k is at its own t_k; the K slots span [min_t, max_t]
+        in approximately even increments of delta = (max_t - min_t) / K.
+      - The model produces scores for all K active frames jointly (with full
+        bidirectional attention inside the active window and read-only
+        attention to the persistent KV cache of clean history).
+      - Each active frame is reverse-stepped by dt = (max_t - min_t) / n_steps.
+        Slot 0 (oldest) is dt-clamped if its t would dip below min_t.
+      - When slot 0 reaches min_t it is finalised: pushed into the persistent
+        KV cache, dropped from the window; a new pure-noise frame at t=max_t
+        appears at slot K-1. Frame indices and sc_ca shift by one.
+
+    Compared to rollout_block_ar (synchronous block schedule):
+      - No block boundary — the window slides continuously, so there is no
+        "edge of the block" where motion can stutter.
+      - One frame finalises every n_steps / K denoising steps (vs. K frames
+        every n_steps in synchronous), so steady-state throughput is the same.
+      - Most directly matches the per-(B, L) independent-t Diffusion Forcing
+        training distribution: training literally drew different t per frame,
+        and this loop keeps active frames at different t at all times.
+
+    Warmup: the active window starts at the steady-state staggered t pattern
+    (slot k initialised by forward-noising the seed identity rigid to its
+    target t). The first finalised frame appears after ~n_steps / K steps.
+    The first ~K finalised frames are produced with a partially populated
+    cache (only the seed) so they will look weakest; this matches all
+    rolling-window approaches.
+
+    Reduces to pure-AR when block_size == 1 (one slot, sweeps max_t→min_t
+    over n_steps before finalising).
+    """
+    assert block_size >= 1
+    K = block_size
+    S = n_steps
+    N = seed_rigids.shape[0]
+    num_blocks = model.score_model._ipa_conf.num_blocks
+    mask_np    = res_mask.cpu().numpy()
+    fixed_mask = torch.zeros_like(res_mask)
+
+    dt    = (max_t - min_t) / S
+    delta = (max_t - min_t) / K
+    eps   = 1e-6
+
+    history_clean = [seed_rigids.to(device)]
+    kv_caches     = [None] * num_blocks
+
+    # Seed cache (one frame at t=min_t).
+    sc_ca_seed = torch.zeros(N, 3, device=device)
+    seed_feats = _make_feats_block(
+        rigids7_block=seed_rigids.unsqueeze(0),
+        sc_ca_block=sc_ca_seed.unsqueeze(0),
+        frame_abs_block=torch.tensor([0], dtype=torch.long, device=device),
+        seq_idx=seq_idx, res_mask=res_mask, fixed_mask=fixed_mask,
+        delta_t=delta_t,
+        t_block=torch.full((1, 1), min_t, device=device),
+        N=N, device=device,
+    )
+    model(seed_feats, kv_caches=kv_caches, update_kv_cache=True)
+
+    # Initialise active window at the steady-state pyramid:
+    #   slot k has t_k = min_t + (k+1) * delta
+    # Slot 0 is closest to finalising (lowest t); slot K-1 is freshly entered
+    # (highest t). Initial rigids are forward-noised identity at each slot's t,
+    # matching what the model expects to see at that t.
+    identity7 = torch.zeros(N, 7, device=device); identity7[:, 0] = 1.0
+    init_active, init_t = [], []
+    for k in range(K):
+        t_k = min_t + (k + 1) * delta
+        init_active.append(_noise_rigids(identity7, t_k, diffuser, mask_np))
+        init_t.append(t_k)
+    active   = torch.stack(init_active, dim=0)                                  # [K, N, 7]
+    active_t = torch.tensor(init_t, dtype=torch.float32, device=device)         # [K]
+
+    # Frame indices: slot k will produce absolute frame `next_finalize_idx + k`.
+    next_finalize_idx = 1
+    frame_abs = torch.arange(
+        next_finalize_idx, next_finalize_idx + K,
+        dtype=torch.long, device=device,
+    )
+
+    # All active slots condition on the most recent finalised frame's CA.
+    sc_ca_active = history_clean[-1][:, 4:7].unsqueeze(0).expand(K, N, 3).contiguous()
+
+    _step_count = 0
+    _finalize_times = []
+    _t_round_start = time.perf_counter()
+
+    while next_finalize_idx < total_frames:
+        # ── Denoising step ────────────────────────────────────────────────
+        # Per-slot dt: clamp slot 0 (and any other slot near min_t) so it
+        # lands exactly at min_t rather than overshooting.
+        dt_per_slot = torch.minimum(
+            torch.full_like(active_t, dt),
+            (active_t - min_t).clamp(min=0.0),
+        )
+
+        feats = _make_feats_block(
+            rigids7_block=active, sc_ca_block=sc_ca_active,
+            frame_abs_block=frame_abs,
+            seq_idx=seq_idx, res_mask=res_mask, fixed_mask=fixed_mask,
+            delta_t=delta_t,
+            t_block=active_t.unsqueeze(0),                                       # [1, K]
+            N=N, device=device,
+        )
+        pred = model(feats, kv_caches=kv_caches, update_kv_cache=False)
+
+        new_active = []
+        for k in range(K):
+            t_k    = float(active_t[k])
+            dt_k   = float(dt_per_slot[k])
+            if dt_k <= 0:
+                # Slot already at min_t — should be finalised this iteration,
+                # not stepped further. Carry forward unchanged.
+                new_active.append(active[k])
+                continue
+            rot_score   = pred['rot_score'][0, k].cpu().numpy()
+            trans_score = pred['trans_score'][0, k].cpu().numpy()
+            perturbed = diffuser.reverse(
+                rigid_t=Rigid.from_tensor_7(active[k].cpu().float()),
+                rot_score=rot_score, trans_score=trans_score,
+                diffuse_mask=mask_np,
+                t=t_k, dt=dt_k,
+                center=False, noise_scale=1.0,
+            )
+            new_active.append(_to_tensor(perturbed.to_tensor_7()).to(device))
+
+        active   = torch.stack(new_active, dim=0)
+        active_t = active_t - dt_per_slot
+        _step_count += 1
+
+        # ── Finalisation: slot 0 (and any others) reached min_t ──────────
+        # In normal operation only slot 0 finalises per step. The while-loop
+        # handles the rare edge case where multiple slots happen to land at
+        # min_t simultaneously.
+        while active_t.numel() > 0 and float(active_t[0]) <= min_t + eps:
+            finalised = active[0]
+            history_clean.append(finalised)
+
+            # Push the finalised frame into the persistent KV cache.
+            cache_feats = _make_feats_block(
+                rigids7_block=finalised.unsqueeze(0),
+                sc_ca_block=sc_ca_active[0:1],
+                frame_abs_block=frame_abs[0:1],
+                seq_idx=seq_idx, res_mask=res_mask, fixed_mask=fixed_mask,
+                delta_t=delta_t,
+                t_block=torch.full((1, 1), min_t, device=device),
+                N=N, device=device,
+            )
+            model(cache_feats, kv_caches=kv_caches, update_kv_cache=True)
+            _trim_kv_caches(kv_caches, max_frames=num_context - 1, N=N)
+
+            if device != 'cpu':
+                torch.cuda.synchronize()
+            _finalize_times.append(time.perf_counter() - _t_round_start)
+            _t_round_start = time.perf_counter()
+
+            next_finalize_idx += 1
+
+            # Refresh sc_ca for the remaining active slots — they now condition
+            # on the just-finalised frame.
+            new_sc_ca_one = history_clean[-1][:, 4:7]                            # [N, 3]
+
+            # Shift the window: drop slot 0, append a new pure-noise slot at
+            # the back at t = max_t.
+            if next_finalize_idx >= total_frames:
+                # We've produced enough frames; no need to refill the window.
+                active   = active[1:]
+                active_t = active_t[1:]
+                frame_abs = frame_abs[1:]
+                sc_ca_active = sc_ca_active[1:] if sc_ca_active.shape[0] > 1 else sc_ca_active[:0]
+                break
+
+            new_back = _noise_rigids(identity7, max_t, diffuser, mask_np).unsqueeze(0)  # [1, N, 7]
+            active = torch.cat([active[1:], new_back], dim=0)                    # [K, N, 7]
+            active_t = torch.cat([
+                active_t[1:],
+                torch.tensor([max_t], device=device, dtype=active_t.dtype),
+            ], dim=0)
+
+            # Frame indices slide by one; the new back slot gets the next
+            # absolute frame index.
+            new_frame_idx = next_finalize_idx + K - 1
+            frame_abs = torch.cat([
+                frame_abs[1:],
+                torch.tensor([new_frame_idx], device=device, dtype=torch.long),
+            ], dim=0)
+
+            # All slots now condition on the new most-recent finalised frame.
+            sc_ca_active = new_sc_ca_one.unsqueeze(0).expand(K, N, 3).contiguous()
+
+        if (next_finalize_idx - 1) > 0 and (next_finalize_idx - 1) % max(10, K) == 0 and _finalize_times:
+            avg_s = float(np.mean(_finalize_times[-max(10, K):]))
+            print(f'  produced {next_finalize_idx - 1}/{total_frames} | '
+                  f'{avg_s:.2f}s/frame (pyramid, K={K})')
+
+    if _finalize_times:
+        per_frame_s = float(np.mean(_finalize_times))
+        total_s     = float(np.sum(_finalize_times))
+        print(f'\nPerformance summary (pyramid, K={K}):')
+        print(f'  Frames generated : {len(_finalize_times)}')
+        print(f'  Total wall time  : {total_s:.1f}s')
+        print(f'  Avg per frame    : {per_frame_s:.2f}s')
+
+    return history_clean
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -473,6 +701,13 @@ def main():
                              'pure-AR rollout; K>1 jointly denoises K frames per '
                              'iteration (requires Diffusion Forcing per-frame t '
                              'training, available after the per-frame t change).')
+    parser.add_argument('--schedule',      type=str, default='sync',
+                        choices=['sync', 'pyramid'],
+                        help='Block-AR schedule (only relevant when --block_size > 1). '
+                             '"sync": all K active frames share t each step, advance by K '
+                             'per round. "pyramid": K active frames at staggered t (true '
+                             'rolling diffusion); one frame finalises every n_steps/K '
+                             'steps, no block boundary.')
     parser.add_argument('--coord_scale',   type=float, default=0.1,
                         help='Coordinate scale used during training (default 0.1 per paper)')
     parser.add_argument('--lora_r',        type=int,   default=0)
@@ -580,8 +815,9 @@ def main():
             device=device,
         )
     else:
-        print(f'Block-AR rollout: K={args.block_size}')
-        generated = rollout_block_ar(
+        rollout_fn = rollout_pyramid if args.schedule == 'pyramid' else rollout_block_ar
+        print(f'Block-AR rollout: K={args.block_size}, schedule={args.schedule}')
+        generated = rollout_fn(
             model=score_network,
             diffuser=diffuser,
             seed_rigids=seed_rigids,
