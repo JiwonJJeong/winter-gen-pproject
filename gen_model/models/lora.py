@@ -75,11 +75,21 @@ def inject_lora(module: nn.Module, target_names: set, r: int, alpha: float) -> N
             inject_lora(child, target_names, r, alpha)
 
 
-def freeze_non_lora(module: nn.Module) -> None:
-    """Freeze all parameters that are not part of a LoRA adapter (lora_A / lora_B)."""
+def freeze_non_lora(module: nn.Module, always_train_substrings=()) -> None:
+    """Freeze all parameters that are not part of a LoRA adapter (lora_A / lora_B).
+
+    Args:
+        always_train_substrings: Substring patterns. Any parameter whose qualified
+            name contains one of these substrings is left trainable. Use for params
+            that were initialized fresh in stage 2 (not present in the stage-1
+            checkpoint), since freezing them at random init makes them useless.
+    """
     for name, p in module.named_parameters():
-        if 'lora_A' not in name and 'lora_B' not in name:
-            p.requires_grad_(False)
+        if 'lora_A' in name or 'lora_B' in name:
+            continue
+        if any(s in name for s in always_train_substrings):
+            continue
+        p.requires_grad_(False)
 
 
 def apply_lora(model: nn.Module, lora_conf) -> nn.Module:
@@ -87,7 +97,10 @@ def apply_lora(model: nn.Module, lora_conf) -> nn.Module:
 
     Args:
         model:      The ScoreNetwork (or any nn.Module) to modify in-place.
-        lora_conf:  OmegaConf node with keys: enabled, r, alpha, target_modules.
+        lora_conf:  OmegaConf node with keys: enabled, r, alpha, target_modules,
+                    and optional always_train_substrings (list of substrings to
+                    keep trainable even when not LoRA-wrapped — used for modules
+                    that are fresh in stage 2 and have no stage-1 checkpoint).
 
     Returns:
         The same model object (modified in-place for convenience).
@@ -98,12 +111,15 @@ def apply_lora(model: nn.Module, lora_conf) -> nn.Module:
     r            = int(lora_conf.r)
     alpha        = float(lora_conf.alpha)
     target_names = set(lora_conf.target_modules)
+    always_train = list(getattr(lora_conf, 'always_train_substrings', []) or [])
 
     inject_lora(model, target_names, r, alpha)
-    freeze_non_lora(model)
+    freeze_non_lora(model, always_train_substrings=always_train)
 
     total     = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[LoRA] r={r}, alpha={alpha}, targets={sorted(target_names)}")
+    if always_train:
+        print(f"[LoRA] always-train substrings: {always_train}")
     print(f"[LoRA] trainable params: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
     return model

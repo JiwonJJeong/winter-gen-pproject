@@ -77,6 +77,14 @@ def default_model_conf(use_temporal_embedding: bool = False,
                 'linear_1', 'linear_2',
                 'q_proj', 'k_proj', 'v_proj', 'out_proj',
             ],
+            # Substrings of param names that must stay trainable even though
+            # they're not LoRA-wrapped. These belong to modules that are
+            # initialized fresh in stage 2 (no stage-1 checkpoint counterpart),
+            # so freezing them at random init makes them dead weight.
+            'always_train_substrings': [
+                '.log_spatial_sigma',  # per-head learnable spatial bias σ
+                '.adaln.',              # AdaLN gamma/beta MLPs in ST attention
+            ],
         },
     })
 
