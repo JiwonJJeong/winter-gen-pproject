@@ -115,6 +115,8 @@ class SE3Diffusion(L.LightningModule):
         cosine_T_max: int = 100_000,
         ema_decay: float = 0.999,
         warmup_steps: int = 0,
+        weight_log_every_n_steps: int = 100,
+        weight_log_print_every_n_steps: int = 500,
     ):
         super().__init__()
         self.model = model
@@ -132,6 +134,8 @@ class SE3Diffusion(L.LightningModule):
         self.aux_t_threshold = aux_t_threshold
         self.cosine_T_max = cosine_T_max
         self.warmup_steps = warmup_steps
+        self.weight_log_every_n_steps = weight_log_every_n_steps
+        self.weight_log_print_every_n_steps = weight_log_print_every_n_steps
         self.step_counter = 0  # mirrors SinFusion's step_counter
         self.ema = EMA(model, decay=ema_decay) if ema_decay > 0 else None
         self._ema_backup = None
@@ -153,22 +157,26 @@ class SE3Diffusion(L.LightningModule):
     # SE3 forward marginal — analog of SinFusion's q_sample
     # ------------------------------------------------------------------
 
-    def _apply_se3_noise(self, batch, t_batch: np.ndarray) -> dict:
+    def _apply_se3_noise(self, batch, t_batch) -> dict:
         """Apply SE3 forward marginal per sample and inject diffusion features into batch.
 
         Handles both single-frame and multi-frame batches:
-          - Single-frame: rigids_0 [B, N, 7]
-          - Multi-frame:  rigids_0 [B, L, N, 7] — same t applied to all L frames
-            per batch item (Diffusion Forcing: all frames share one noise level).
+          - Single-frame: rigids_0 [B, N, 7], t_batch [B]
+          - Multi-frame:  rigids_0 [B, L, N, 7], t_batch [B, L]
+            (Diffusion Forcing: each frame draws an independent noise level so
+             at inference the model can roll a sliding window where finalized
+             frames sit at t=0 and new frames sit near t=1.)
 
         Args:
             batch:   dict with rigids_0 [B, N, 7] or [B, L, N, 7], res_mask [B, N]
-            t_batch: [B] numpy array of diffusion times
+            t_batch: numpy array of diffusion times — shape [B] (single-frame)
+                     or [B, L] (multi-frame).
 
         Returns:
             batch updated in-place with:
                 rigids_t, rot_score, trans_score,
                 rot_score_scaling, trans_score_scaling, t
+            For multi-frame, scalings and t are [B, L]; for single-frame, [B].
         """
         B = batch['rigids_0'].shape[0]
         multi_frame = batch['rigids_0'].ndim == 4
@@ -176,24 +184,28 @@ class SE3Diffusion(L.LightningModule):
 
         if multi_frame:
             L = batch['rigids_0'].shape[1]
+            assert t_batch.shape == (B, L), (
+                f"multi-frame _apply_se3_noise expects t_batch shape ({B}, {L}), "
+                f"got {tuple(t_batch.shape)}"
+            )
             all_rigids_t, all_rot_scores, all_trans_scores = [], [], []
-            rot_scalings, trans_scalings = [], []
+            rot_scalings  = np.zeros((B, L), dtype=np.float32)
+            trans_scalings = np.zeros((B, L), dtype=np.float32)
 
             for i in range(B):
-                t_i = float(t_batch[i])
                 mask_i = batch['res_mask'][i].cpu().numpy()
                 frame_rigids_t, frame_rot, frame_trans = [], [], []
                 for l in range(L):
+                    t_il = float(t_batch[i, l])
                     rigids_0_il = Rigid.from_tensor_7(batch['rigids_0'][i, l].float())
                     diff = self.diffuser.forward_marginal(
-                        rigids_0=rigids_0_il, t=t_i,
+                        rigids_0=rigids_0_il, t=t_il,
                         diffuse_mask=mask_i, as_tensor_7=True)
                     frame_rigids_t.append(_to_tensor(diff['rigids_t']))
                     frame_rot.append(_to_tensor(diff['rot_score']))
                     frame_trans.append(_to_tensor(diff['trans_score']))
-                # Same scaling for all L frames (same t)
-                rot_scalings.append(float(diff['rot_score_scaling']))
-                trans_scalings.append(float(diff['trans_score_scaling']))
+                    rot_scalings[i, l]   = float(diff['rot_score_scaling'])
+                    trans_scalings[i, l] = float(diff['trans_score_scaling'])
                 all_rigids_t.append(torch.stack(frame_rigids_t))    # [L, N, 7]
                 all_rot_scores.append(torch.stack(frame_rot))        # [L, N, 3]
                 all_trans_scores.append(torch.stack(frame_trans))    # [L, N, 3]
@@ -201,9 +213,9 @@ class SE3Diffusion(L.LightningModule):
             batch['rigids_t']            = torch.stack(all_rigids_t).to(device)     # [B,L,N,7]
             batch['rot_score']           = torch.stack(all_rot_scores).to(device)   # [B,L,N,3]
             batch['trans_score']         = torch.stack(all_trans_scores).to(device) # [B,L,N,3]
-            batch['rot_score_scaling']   = torch.tensor(rot_scalings,  dtype=torch.float32, device=device)
-            batch['trans_score_scaling'] = torch.tensor(trans_scalings, dtype=torch.float32, device=device)
-            batch['t']                   = torch.tensor(t_batch, dtype=torch.float32, device=device)
+            batch['rot_score_scaling']   = torch.from_numpy(rot_scalings).to(device)   # [B, L]
+            batch['trans_score_scaling'] = torch.from_numpy(trans_scalings).to(device) # [B, L]
+            batch['t']                   = torch.tensor(t_batch, dtype=torch.float32, device=device)  # [B, L]
         else:
             rigids_t_list, rot_scores, trans_scores = [], [], []
             rot_scalings, trans_scalings = [], []
@@ -250,12 +262,14 @@ class SE3Diffusion(L.LightningModule):
             (total, rot_loss, trans_loss, psi_loss)
         """
         multi_frame = pred['rot_score'].ndim == 4  # [B, L, N, 3]
-        t = batch['t'].float()  # [B]
+        t = batch['t'].float()  # [B] (single-frame) or [B, L] (multi-frame)
 
         if multi_frame:
             L = pred['rot_score'].shape[1]
-            rot_scaling   = batch['rot_score_scaling'].float()[:, None, None, None] + 1e-8
-            trans_scaling = batch['trans_score_scaling'].float()[:, None, None, None] + 1e-8
+            # Per-frame scalings under Diffusion Forcing: each frame has its own
+            # t and therefore its own SE(3) score scaling.
+            rot_scaling   = batch['rot_score_scaling'].float()[:, :, None, None] + 1e-8   # [B, L, 1, 1]
+            trans_scaling = batch['trans_score_scaling'].float()[:, :, None, None] + 1e-8 # [B, L, 1, 1]
             # Expand res_mask [B, N] → [B, L, N]
             mask_exp = mask[:, None, :].expand(-1, L, -1)
         else:
@@ -279,10 +293,12 @@ class SE3Diffusion(L.LightningModule):
 
         n_visible  = mask_exp.sum() + 1e-8
 
-        # Time-filtered rotation loss (paper: only apply when t < 0.2)
-        rot_t_mask = (t < self.rot_t_threshold).float()  # [B]
+        # Time-filtered rotation loss (paper: only apply when t < 0.2).
+        # Per-frame mask under Diffusion Forcing — different frames in the
+        # same batch can be at different noise levels.
+        rot_t_mask = (t < self.rot_t_threshold).float()  # [B] or [B, L]
         if multi_frame:
-            rot_t_mask = rot_t_mask[:, None, None].expand_as(rot_mse)
+            rot_t_mask = rot_t_mask[:, :, None].expand_as(rot_mse)  # [B, L, N]
         else:
             rot_t_mask = rot_t_mask[:, None].expand_as(rot_mse)
         # Normalise by the tokens that actually contribute (t < threshold),
@@ -362,15 +378,27 @@ class SE3Diffusion(L.LightningModule):
         range without gaps — the SE3 analog of SinFusion's continuous α̂ sampling.
         """
         B = batch['rigids_0'].shape[0]
+        multi_frame = batch['rigids_0'].ndim == 4
 
         # 1. Stratified t sampling (SinFusion-style continuous noise coverage).
-        #    Divide [min_t, max_t] into B strata; sample one t per stratum.
-        #    With B=1 this reduces to uniform, but with B>1 it guarantees
-        #    every batch covers the full noise range.
-        strata = np.linspace(self.min_t, self.max_t, B + 1)
-        t_batch = np.array([
-            np.random.uniform(strata[i], strata[i + 1]) for i in range(B)
-        ])
+        #    For multi-frame Diffusion Forcing we draw an independent t per
+        #    (batch, frame) pair so the model sees mixed-noise contexts at
+        #    training time — a prerequisite for rolling-window inference where
+        #    finalized frames sit at t=0 and new frames at t≈max_t.
+        if multi_frame:
+            L = batch['rigids_0'].shape[1]
+            n_strata = B * L
+            strata = np.linspace(self.min_t, self.max_t, n_strata + 1)
+            t_flat = np.array([
+                np.random.uniform(strata[i], strata[i + 1]) for i in range(n_strata)
+            ])
+            np.random.shuffle(t_flat)            # break the (B, L) ↔ stratum correlation
+            t_batch = t_flat.reshape(B, L)        # [B, L]
+        else:
+            strata = np.linspace(self.min_t, self.max_t, B + 1)
+            t_batch = np.array([
+                np.random.uniform(strata[i], strata[i + 1]) for i in range(B)
+            ])
 
         # 2. SE3 forward marginal (SinFusion: x_noisy = q_sample(x_clean, t))
         batch = self._apply_se3_noise(batch, t_batch)
@@ -405,6 +433,139 @@ class SE3Diffusion(L.LightningModule):
         not on_before_optimizer_step, so shadow weights see w_{t+1} not w_t)."""
         if self.ema is not None:
             self.ema.update(self.model)
+        n = self.weight_log_every_n_steps
+        if n > 0 and self.global_step % n == 0:
+            self._log_st_attn_weight_diagnostics()
+
+    def on_before_optimizer_step(self, optimizer):
+        """Capture gradient diagnostics post-accumulation, pre-step.
+
+        Pairs with weight diagnostics: weights answer 'did the param move?',
+        grads answer 'was the optimizer asked to move it?'. If the zero-init
+        param has zero or None gradient, autograd is broken; if it has grad
+        but the weight isn't moving, the issue is LR / α / numerical scaling.
+        """
+        n = self.weight_log_every_n_steps
+        if n > 0 and self.global_step % n == 0:
+            self._log_st_attn_grad_diagnostics()
+
+    def _log_st_attn_grad_diagnostics(self):
+        """Per-block gradient diagnostics for SpatioTemporalAttention.
+
+        Distinguishes three failure modes:
+          - grad is None → param not in the autograd graph at all (very broken,
+            e.g. a `.detach()` upstream of this param severed the chain).
+          - grad norm == 0 → param is in the graph but the loss doesn't
+            depend on it (or every contribution cancels — also a bug signal).
+          - grad norm > 0 but weight not moving → LR / LoRA α too low, or
+            optimizer not stepping this param.
+        """
+        import re
+        block_re = re.compile(r'.*st_attn_(\d+)\.')
+
+        block_grad_sq: dict = {}
+        zero_init_grad_sq: dict = {}
+        none_grad_count: dict = {}
+
+        for name, p in self.model.named_parameters():
+            m = block_re.match(name)
+            if m is None or not p.requires_grad:
+                continue
+            b = int(m.group(1))
+            if p.grad is None:
+                none_grad_count[b] = none_grad_count.get(b, 0) + 1
+                continue
+            gsq = p.grad.detach().pow(2).sum().item()
+            block_grad_sq[b] = block_grad_sq.get(b, 0.0) + gsq
+            if name.endswith('.out_proj.lora_B') or name.endswith('.out_proj.weight'):
+                zero_init_grad_sq[b] = zero_init_grad_sq.get(b, 0.0) + gsq
+
+        if not block_grad_sq and not none_grad_count:
+            return
+
+        for b, sq in block_grad_sq.items():
+            self.log(f'grads/st_attn_block_{b}/grad_norm', sq ** 0.5,
+                     on_step=True, on_epoch=False)
+        for b, sq in zero_init_grad_sq.items():
+            self.log(f'grads/st_attn_block_{b}/out_proj_zero_init_grad_norm', sq ** 0.5,
+                     on_step=True, on_epoch=False)
+        for b, count in none_grad_count.items():
+            self.log(f'grads/st_attn_block_{b}/none_grad_count', float(count),
+                     on_step=True, on_epoch=False)
+
+        print_every = self.weight_log_print_every_n_steps
+        if print_every > 0 and self.global_step % print_every == 0:
+            blocks = sorted(set(block_grad_sq) | set(none_grad_count))
+            zinit = [f'{zero_init_grad_sq.get(b, 0.0) ** 0.5:.3g}' for b in blocks]
+            nones = [str(none_grad_count.get(b, 0)) for b in blocks]
+            print(f'[st_attn_grads]   step={self.global_step} '
+                  f'|grad_zero_init|=[{", ".join(zinit)}] none_grads=[{", ".join(nones)}]')
+
+    def _log_st_attn_weight_diagnostics(self):
+        """Per-block weight diagnostics for SpatioTemporalAttention.
+
+        Why these specific scalars: in stage-2 LoRA, both the frozen base of
+        out_proj (final-init → 0) and lora_B (zero-init) are zero at the start
+        of training, so the ST attention's contribution is exactly zero until
+        these weights move. If `out_proj_norm` stays near zero, the conditional
+        path is not contributing and the model effectively reproduces the
+        unconditional base — which presents as "no denoising" at inference.
+
+        Logs scalars to whatever logger is wired (W&B / CSV / TensorBoard) and
+        prints a compact stdout summary periodically so values are visible
+        directly in the Colab cell output without needing W&B to render.
+        """
+        import re
+        block_re = re.compile(r'.*st_attn_(\d+)\.')
+
+        block_total_sq: dict = {}
+        out_proj_sq: dict = {}
+        zero_init_sq: dict = {}    # Norm of the param that starts at exactly zero —
+                                   # the cleanest "did it escape zero-init?" signal.
+        sigma_means: dict = {}
+
+        for name, p in self.model.named_parameters():
+            m = block_re.match(name)
+            if m is None:
+                continue
+            b = int(m.group(1))
+            sq = p.detach().pow(2).sum().item()
+            if p.requires_grad:
+                block_total_sq[b] = block_total_sq.get(b, 0.0) + sq
+                if '.out_proj.' in name:
+                    out_proj_sq[b] = out_proj_sq.get(b, 0.0) + sq
+                # Zero-init param identification:
+                #   stage-2 LoRA: `out_proj.lora_B` (other LoRA matrices are
+                #     random-init, which would mask the signal).
+                #   stage-1 no-LoRA: `out_proj.weight` (final init → 0).
+                if name.endswith('.out_proj.lora_B') or name.endswith('.out_proj.weight'):
+                    zero_init_sq[b] = zero_init_sq.get(b, 0.0) + sq
+            if name.endswith('.log_spatial_sigma'):
+                sigma_means[b] = p.detach().exp().mean().item()
+
+        if not block_total_sq:
+            return  # Model has no SpatioTemporalAttention modules.
+
+        for b, sq in block_total_sq.items():
+            self.log(f'weights/st_attn_block_{b}/trainable_norm', sq ** 0.5,
+                     on_step=True, on_epoch=False)
+        for b, sq in out_proj_sq.items():
+            self.log(f'weights/st_attn_block_{b}/out_proj_norm', sq ** 0.5,
+                     on_step=True, on_epoch=False)
+        for b, sq in zero_init_sq.items():
+            self.log(f'weights/st_attn_block_{b}/out_proj_zero_init_norm', sq ** 0.5,
+                     on_step=True, on_epoch=False)
+        for b, mean in sigma_means.items():
+            self.log(f'weights/st_attn_block_{b}/spatial_sigma_mean', mean,
+                     on_step=True, on_epoch=False)
+
+        print_every = self.weight_log_print_every_n_steps
+        if print_every > 0 and self.global_step % print_every == 0:
+            blocks = sorted(block_total_sq)
+            zinit = [f'{zero_init_sq.get(b, 0.0) ** 0.5:.3g}' for b in blocks]
+            sig = [f'{sigma_means.get(b, float("nan")):.3g}' for b in blocks]
+            print(f'[st_attn_weights] step={self.global_step} '
+                  f'|out_proj_zero_init|=[{", ".join(zinit)}] σ=[{", ".join(sig)}]')
 
     def on_validation_epoch_start(self):
         """Swap to EMA weights for validation (MDGen pattern)."""

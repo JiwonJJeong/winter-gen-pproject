@@ -49,18 +49,24 @@ class AdaLN(nn.Module):
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x:    [..., c_s]       — input features (any leading batch dims).
-            cond: [B, cond_dim]    — conditioning vector, broadcast over token dims.
+            x:    [..., c_s]                 input features (any leading dims).
+            cond: [B, cond_dim]              per-batch conditioning, OR
+                  [B, L, cond_dim]           per-(batch, frame) conditioning
+                                             (Diffusion Forcing).
 
         Returns:
             Tensor of the same shape as x.
         """
-        # Broadcast cond to match x: cond [B, c_s] → [B, 1, ..., 1, c_s]
         gamma = self.gamma_mlp(cond)
         beta  = self.beta_mlp(cond)
+        # Broadcast cond's leading dims to match x by inserting singleton axes
+        # *before* the channel dim (not at axis 1). For x=[B, L, N, c_s]:
+        #   - cond=[B, c_s]    → gamma=[B, 1, 1, c_s]
+        #   - cond=[B, L, c_s] → gamma=[B, L, 1, c_s]   (per-frame cond)
+        # Inserting at axis 1 would misalign cond's L dim with x's N dim.
         for _ in range(x.dim() - cond.dim()):
-            gamma = gamma.unsqueeze(1)
-            beta  = beta.unsqueeze(1)
+            gamma = gamma.unsqueeze(-2)
+            beta  = beta.unsqueeze(-2)
 
         # (1 + gamma) keeps the structural 1 outside the MLP so the scale can
         # never flip sign regardless of how far gamma drifts during training.

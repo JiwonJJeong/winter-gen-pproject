@@ -47,16 +47,32 @@ class StarScoreNetwork(nn.Module):
     # ------------------------------------------------------------------
 
     def _build_cond(self, input_feats: dict) -> torch.Tensor:
-        """Build [B, 2*D] conditioning vector from diffusion time and delta_t.
+        """Build conditioning vector from diffusion time and delta_t.
 
         cond = cat([t_emb(t), index_emb(log_delta_t_normalised)], dim=-1)
+
+        Shapes:
+          - Single-frame (t shape [B]):     cond shape [B, 2*D]
+          - Multi-frame  (t shape [B, L]):  cond shape [B, L, 2*D]
+            Per-frame t under Diffusion Forcing means each frame's AdaLN sees
+            its own noise level. delta_t is per-batch (shared across frames),
+            so it is broadcast across L.
 
         For unconditional batches (no delta_t in input_feats) the second half
         is zeros so AdaLN reduces to an identity residual (gamma=1, beta=0 at
         init, no delta_t signal).
         """
         D = self._model_conf.embed.index_embed_size  # 32
-        t_emb = get_timestep_embedding(input_feats['t'], D)  # [B, D]
+        t = input_feats['t']
+        per_frame = t.ndim == 2
+
+        # get_timestep_embedding expects 1-D input; flatten then unflatten
+        # to support per-frame t [B, L] under Diffusion Forcing.
+        if per_frame:
+            B, L = t.shape
+            t_emb = get_timestep_embedding(t.reshape(B * L), D).reshape(B, L, D)
+        else:
+            t_emb = get_timestep_embedding(t, D)  # [B, D]
 
         delta_t = input_feats.get('delta_t', None)
         if delta_t is not None:
@@ -67,12 +83,14 @@ class StarScoreNetwork(nn.Module):
             dt_emb = get_index_embedding(log_dt_norm, embed_size=D)  # [B, D]
         else:
             dt_emb = torch.zeros(
-                input_feats['t'].shape[0], D,
-                device=input_feats['t'].device,
-                dtype=torch.float32,
+                t.shape[0], D, device=t.device, dtype=torch.float32,
             )
 
-        return torch.cat([t_emb, dt_emb], dim=-1)  # [B, 2*D]
+        if per_frame:
+            # Broadcast per-batch delta_t across the L frame dim.
+            dt_emb = dt_emb[:, None, :].expand(-1, t.shape[1], -1)  # [B, L, D]
+
+        return torch.cat([t_emb, dt_emb], dim=-1)  # [B, 2*D] or [B, L, 2*D]
 
     # ------------------------------------------------------------------
     # Psi masking helper (mirrors upstream ScoreNetwork)
@@ -121,11 +139,19 @@ class StarScoreNetwork(nn.Module):
             if frame_idx is not None and frame_idx.ndim == 2:
                 frame_idx = frame_idx[0]                          # [L]
 
+            # Per-frame t under Diffusion Forcing: pass each frame's own
+            # noise level into Embedder so the per-frame node features carry
+            # the correct t embedding. Single-frame t [B] is broadcast across
+            # frames (back-compat with shared-t batches if anyone passes them).
+            t = input_feats['t']
+            t_per_frame = (t.ndim == 2)
+
             node_embeds, edge_embeds = [], []
             for l in range(L):
+                t_l = t[:, l] if t_per_frame else t
                 n_emb, e_emb = self.embedding_layer(
                     seq_idx=input_feats['seq_idx'],
-                    t=input_feats['t'],
+                    t=t_l,
                     fixed_mask=fixed_mask,
                     self_conditioning_ca=sc_ca_t[:, l],
                 )

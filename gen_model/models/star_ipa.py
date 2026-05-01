@@ -110,8 +110,16 @@ class StarIpaScore(IpaScore):
             node_mask       = flat(_res_mask)         # [B*L, N]
             fixed_mask_flat = flat(_fixed_mask)       # [B*L, N]
             rigids_t_flat   = flat(input_rigids_raw)  # [B*L, N, 7]
-            # t is [B]; broadcast to all L frames → [B*L]
-            t_flat = input_feats['t'].unsqueeze(1).expand(B, L).reshape(B * L)
+            # Under Diffusion Forcing t is [B, L] (per-frame noise level);
+            # legacy shared-t batches still pass [B] which we broadcast.
+            t_in = input_feats['t']
+            if t_in.ndim == 2:
+                assert t_in.shape == (B, L), (
+                    f"t shape {tuple(t_in.shape)} does not match (B={B}, L={L})"
+                )
+                t_flat = t_in.reshape(B * L)
+            else:
+                t_flat = t_in.unsqueeze(1).expand(B, L).reshape(B * L)
         else:
             node_mask       = input_feats['res_mask'].type(torch.float32)
             fixed_mask_flat = input_feats['fixed_mask'].type(torch.float32)

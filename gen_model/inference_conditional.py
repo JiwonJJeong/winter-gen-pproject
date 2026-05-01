@@ -97,6 +97,36 @@ def _make_feats_single(frame7, sc_ca, frame_abs, seq_idx, res_mask, fixed_mask,
     }
 
 
+def _make_feats_block(rigids7_block, sc_ca_block, frame_abs_block,
+                      seq_idx, res_mask, fixed_mask,
+                      delta_t, t_block, N, device):
+    """Build input_feats for a K-frame active block (B=1, L=K).
+
+    Args:
+        rigids7_block:    [K, N, 7]  current rigids for the K active frames.
+        sc_ca_block:      [K, N, 3]  per-frame self-conditioning CA positions.
+        frame_abs_block:  [K]        absolute frame indices for RoPE.
+        t_block:          [1, K]     per-frame diffusion times. Per-frame so it
+                                     triggers the multi-frame branch in
+                                     _build_cond / _apply_se3_noise. Synchronous
+                                     scheduling means all K values are equal at
+                                     each denoising step, but per-frame is the
+                                     general shape.
+    """
+    K = rigids7_block.shape[0]
+    return {
+        'rigids_t':               rigids7_block.unsqueeze(0),               # [1, K, N, 7]
+        'sc_ca_t':                sc_ca_block.unsqueeze(0),                 # [1, K, N, 3]
+        'frame_idx':              frame_abs_block,                          # [K]
+        'delta_t':                torch.tensor([delta_t], dtype=torch.float32, device=device),
+        'res_mask':               res_mask.unsqueeze(0),                    # [1, N]
+        'fixed_mask':             fixed_mask.unsqueeze(0),                  # [1, N]
+        'seq_idx':                seq_idx.unsqueeze(0),                     # [1, N]
+        't':                      t_block,                                  # [1, K]
+        'torsion_angles_sin_cos': torch.zeros(1, K, N, 7, 2, device=device),
+    }
+
+
 def _trim_kv_caches(kv_caches: list, max_frames: int, N: int):
     """Trim each cache to keep at most max_frames * N tokens (oldest dropped)."""
     max_tokens = max_frames * N
@@ -257,6 +287,164 @@ def rollout(
 
 
 # ---------------------------------------------------------------------------
+# Block-AR rollout (K-frame joint denoising per iteration)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def rollout_block_ar(
+    model: StarScoreNetwork,
+    diffuser,
+    seed_rigids: torch.Tensor,
+    seq_idx: torch.Tensor,
+    res_mask: torch.Tensor,
+    total_frames: int,
+    num_context: int,
+    block_size: int,
+    delta_t: float,
+    n_steps: int,
+    min_t: float,
+    max_t: float,
+    device: str,
+) -> list:
+    """Block-AR rollout: jointly denoise K new frames per iteration.
+
+    Compared to the K=1 `rollout()` above:
+      - K = block_size frames are denoised together with full intra-block
+        bidirectional information flow (each active frame attends to earlier
+        active frames + clean history). This is what gives block-AR its
+        intra-block coherence vs. pure AR.
+      - After n_steps the K finalized frames are pushed into the persistent
+        KV cache in one update_kv_cache pass and the window advances by K.
+      - All K active frames are at the same t at each denoising step
+        (synchronous block). The trained model also handles per-frame
+        independent t (Diffusion Forcing), so a staggered/pyramid schedule
+        is in-distribution and a natural follow-up — left out here for
+        simplicity.
+
+    Self-conditioning (sc_ca_t): all K active frames condition on the most
+    recent finalized frame's CA. Per-frame self-conditioning across the
+    block would require carrying intermediate predictions step-to-step;
+    the current model trained without that, so the simple choice is faithful.
+
+    Reduces to the existing K=1 path when block_size == 1.
+    """
+    assert block_size >= 1
+    N          = seed_rigids.shape[0]
+    K          = block_size
+    num_blocks = model.score_model._ipa_conf.num_blocks
+    mask_np    = res_mask.cpu().numpy()
+    fixed_mask = torch.zeros_like(res_mask)
+
+    history_clean = [seed_rigids.to(device)]
+    kv_caches     = [None] * num_blocks
+
+    # Seed the cache with the initial frame at near-zero t (one-frame block).
+    sc_ca_seed = torch.zeros(N, 3, device=device)
+    seed_feats = _make_feats_block(
+        rigids7_block=seed_rigids.unsqueeze(0),                     # [1, N, 7]
+        sc_ca_block=sc_ca_seed.unsqueeze(0),                        # [1, N, 3]
+        frame_abs_block=torch.tensor([0], dtype=torch.long, device=device),
+        seq_idx=seq_idx, res_mask=res_mask, fixed_mask=fixed_mask,
+        delta_t=delta_t,
+        t_block=torch.full((1, 1), min_t, device=device),           # [1, 1]
+        N=N, device=device,
+    )
+    model(seed_feats, kv_caches=kv_caches, update_kv_cache=True)
+
+    ts = np.linspace(max_t, min_t, n_steps + 1)
+    frames_produced = 1   # seed counts as produced
+
+    _block_times = []
+
+    while frames_produced < total_frames:
+        K_now = min(K, total_frames - frames_produced)
+        _t_start = time.perf_counter()
+
+        # Initialise K_now pure-noise frames at t=max_t
+        identity7 = torch.zeros(N, 7, device=device)
+        identity7[:, 0] = 1.0
+        active = torch.stack(
+            [_noise_rigids(identity7, max_t, diffuser, mask_np)
+             for _ in range(K_now)],
+            dim=0,
+        )                                                            # [K_now, N, 7]
+
+        sc_ca_active = history_clean[-1][:, 4:7].unsqueeze(0).expand(K_now, N, 3).contiguous()
+        frame_abs    = torch.arange(
+            frames_produced, frames_produced + K_now,
+            dtype=torch.long, device=device,
+        )
+
+        # Joint denoising with read-only KV cache
+        for step_i in range(n_steps):
+            t_now  = float(ts[step_i])
+            t_next = float(ts[step_i + 1])
+            dt     = t_now - t_next
+            t_block = torch.full((1, K_now), t_now, device=device)
+
+            feats = _make_feats_block(
+                rigids7_block=active, sc_ca_block=sc_ca_active,
+                frame_abs_block=frame_abs,
+                seq_idx=seq_idx, res_mask=res_mask, fixed_mask=fixed_mask,
+                delta_t=delta_t, t_block=t_block, N=N, device=device,
+            )
+            pred = model(feats, kv_caches=kv_caches, update_kv_cache=False)
+
+            # Per-frame reverse step (each active frame is independent in this op)
+            new_active = []
+            for l in range(K_now):
+                rot_score   = pred['rot_score'][0, l].cpu().numpy()
+                trans_score = pred['trans_score'][0, l].cpu().numpy()
+                perturbed = diffuser.reverse(
+                    rigid_t=Rigid.from_tensor_7(active[l].cpu().float()),
+                    rot_score=rot_score, trans_score=trans_score,
+                    diffuse_mask=mask_np,
+                    t=t_now, dt=dt,
+                    center=False, noise_scale=1.0,
+                )
+                new_active.append(_to_tensor(perturbed.to_tensor_7()).to(device))
+            active = torch.stack(new_active, dim=0)
+
+        # Finalise the block: append to history, push into persistent KV cache
+        for l in range(K_now):
+            history_clean.append(active[l])
+
+        cache_t = torch.full((1, K_now), min_t, device=device)
+        cache_feats = _make_feats_block(
+            rigids7_block=active, sc_ca_block=sc_ca_active,
+            frame_abs_block=frame_abs,
+            seq_idx=seq_idx, res_mask=res_mask, fixed_mask=fixed_mask,
+            delta_t=delta_t, t_block=cache_t, N=N, device=device,
+        )
+        model(cache_feats, kv_caches=kv_caches, update_kv_cache=True)
+
+        # Trim cache to the training window so attention stays in-distribution.
+        _trim_kv_caches(kv_caches, max_frames=num_context - 1, N=N)
+
+        if device != 'cpu':
+            torch.cuda.synchronize()
+        _block_times.append(time.perf_counter() - _t_start)
+        frames_produced += K_now
+
+        if (frames_produced - 1) % max(10, K) == 0 or frames_produced == total_frames:
+            avg_s = float(np.mean(_block_times))
+            print(f'  produced {frames_produced}/{total_frames} | '
+                  f'{avg_s:.2f}s/block (K={K_now})')
+
+    if _block_times:
+        avg_block_s = float(np.mean(_block_times))
+        total_s     = float(np.sum(_block_times))
+        per_frame_s = total_s / max(1, frames_produced - 1)
+        print(f'\nPerformance summary (block-AR, K={K}):')
+        print(f'  Frames generated : {frames_produced - 1}')
+        print(f'  Total wall time  : {total_s:.1f}s')
+        print(f'  Avg per block    : {avg_block_s:.2f}s')
+        print(f'  Avg per frame    : {per_frame_s:.2f}s')
+
+    return history_clean
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -280,6 +468,11 @@ def main():
     parser.add_argument('--n_steps',       type=int, default=150)
     parser.add_argument('--min_t',         type=float, default=0.01)
     parser.add_argument('--max_t',         type=float, default=0.1)
+    parser.add_argument('--block_size',    type=int, default=1,
+                        help='Block-AR block size K. K=1 (default) is the existing '
+                             'pure-AR rollout; K>1 jointly denoises K frames per '
+                             'iteration (requires Diffusion Forcing per-frame t '
+                             'training, available after the per-frame t change).')
     parser.add_argument('--coord_scale',   type=float, default=0.1,
                         help='Coordinate scale used during training (default 0.1 per paper)')
     parser.add_argument('--lora_r',        type=int,   default=0)
@@ -371,20 +564,38 @@ def main():
     print(f'Generating {args.total_frames} frames '
           f'(N={seq_idx.shape[0]} residues, delta_t={args.delta_t} ns) ...')
 
-    generated = rollout(
-        model=score_network,
-        diffuser=diffuser,
-        seed_rigids=seed_rigids,
-        seq_idx=seq_idx,
-        res_mask=res_mask,
-        total_frames=args.total_frames,
-        num_context=args.num_frames,
-        delta_t=args.delta_t,
-        n_steps=args.n_steps,
-        min_t=args.min_t,
-        max_t=args.max_t,
-        device=device,
-    )
+    if args.block_size == 1:
+        generated = rollout(
+            model=score_network,
+            diffuser=diffuser,
+            seed_rigids=seed_rigids,
+            seq_idx=seq_idx,
+            res_mask=res_mask,
+            total_frames=args.total_frames,
+            num_context=args.num_frames,
+            delta_t=args.delta_t,
+            n_steps=args.n_steps,
+            min_t=args.min_t,
+            max_t=args.max_t,
+            device=device,
+        )
+    else:
+        print(f'Block-AR rollout: K={args.block_size}')
+        generated = rollout_block_ar(
+            model=score_network,
+            diffuser=diffuser,
+            seed_rigids=seed_rigids,
+            seq_idx=seq_idx,
+            res_mask=res_mask,
+            total_frames=args.total_frames,
+            num_context=args.num_frames,
+            block_size=args.block_size,
+            delta_t=args.delta_t,
+            n_steps=args.n_steps,
+            min_t=args.min_t,
+            max_t=args.max_t,
+            device=device,
+        )
 
     traj = torch.stack(generated, dim=0).cpu()   # [T, N, 7]
     torch.save(traj, args.output)

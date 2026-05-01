@@ -15,6 +15,7 @@ Key properties:
   - KV-cache support for efficient autoregressive inference.
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -62,6 +63,17 @@ class SpatioTemporalAttention(nn.Module):
         self.scale = head_dim ** -0.5
         self.causal = causal
         self.spatial_sigma = spatial_sigma
+
+        # Per-head learnable Gaussian length scale for the spatial bias.
+        # Parameterized as log(sigma) so sigma stays positive; init has every
+        # head at the configured spatial_sigma. Heads can drift to specialize
+        # at different length scales, or learn sigma → ∞ to ignore the prior.
+        if spatial_sigma > 0:
+            self.log_spatial_sigma = nn.Parameter(
+                torch.full((num_heads,), math.log(spatial_sigma))
+            )
+        else:
+            self.register_parameter('log_spatial_sigma', None)
 
         # Input conditioning
         self.adaln = AdaLN(c_s=c_s, cond_dim=cond_dim)
@@ -227,10 +239,10 @@ class SpatioTemporalAttention(nn.Module):
             L_kv=L_total, mask_kv=full_mask_kv)
 
         # 6b. Spatial Gaussian bias (SinFusion-inspired local receptive field)
-        #     Adds -(d_ij / sigma)^2 to attention logits so distant residues
-        #     contribute exponentially less.  Only the spatial (within-frame)
-        #     component is penalised; cross-frame pairs of the same residue
-        #     are unaffected (distance = 0 within a token's own residue).
+        #     Per-head learnable sigma: each head has its own length scale, so
+        #     bias_h(i,j) = -(d_ij / sigma_h)^2.  At init every head matches the
+        #     configured spatial_sigma; training is free to specialize heads to
+        #     different scales or push sigma_h → ∞ to ignore the prior.
         if self.spatial_sigma > 0 and ca_pos is not None:
             # ca_pos: [B, L, N, 3] → flatten to [B, T_new, 3]
             ca_flat = ca_pos.reshape(B, T_new, 3)
@@ -238,16 +250,18 @@ class SpatioTemporalAttention(nn.Module):
             # undefined at zero, which NaN-poisons the diagonal of cdist output).
             diff = ca_flat.unsqueeze(2) - ca_flat.unsqueeze(1)   # [B, T_new, T_new, 3]
             dist_sq = diff.pow(2).sum(-1)                         # [B, T_new, T_new]
-            new_bias = -(dist_sq / self.spatial_sigma ** 2).unsqueeze(1)  # [B, 1, T_new, T_new]
+            # Per-head 1/sigma^2 = exp(-2 * log_sigma); shape [1, H, 1, 1].
+            inv_sigma_sq = (-2.0 * self.log_spatial_sigma).exp().view(1, H, 1, 1)
+            new_bias = -dist_sq.unsqueeze(1) * inv_sigma_sq       # [B, H, T_new, T_new]
             if L_cached > 0 and kv_cache is not None:
                 # For cached context we have no CA positions — zero spatial penalty
                 # for cached tokens.  Use torch.cat (not in-place assignment) so the
                 # autograd graph is preserved through new_bias.
-                zeros_cached = torch.zeros(B, 1, T_new, L_cached * N,
+                zeros_cached = torch.zeros(B, H, T_new, L_cached * N,
                                            device=s_frames.device, dtype=q.dtype)
-                spatial_bias = torch.cat([zeros_cached, new_bias], dim=-1)  # [B, 1, T_new, T_total]
+                spatial_bias = torch.cat([zeros_cached, new_bias], dim=-1)  # [B, H, T_new, T_total]
             else:
-                spatial_bias = new_bias  # [B, 1, T, T]
+                spatial_bias = new_bias  # [B, H, T, T]
             attn_bias = attn_bias + spatial_bias
 
         # 7. Scaled dot-product attention
